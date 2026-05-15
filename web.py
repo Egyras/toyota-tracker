@@ -93,7 +93,12 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True, created_o
             today = datetime.utcnow().strftime("%Y-%m-%d")
             if db.execute("SELECT 1 FROM checks WHERE order_hash=? AND ts LIKE ?",
                           (order_hash, f"{today}%")).fetchone():
-                # Still update step_durations even if skipping checks insert
+                # Still update created_on if we now have it and it was missing
+                if created_on:
+                    db.execute(
+                        "UPDATE checks SET created_on=? WHERE order_hash=? AND created_on IS NULL",
+                        (created_on[:10], order_hash)
+                    )
                 _save_step_durations(db, order_hash, model, dest_country, steps, step_dates)
                 db.commit()
                 return
@@ -117,6 +122,12 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True, created_o
                          "type": d.get("destinationType"), "visited": d.get("isVisited")}
                         for d in deliveries])
         ))
+        # Backfill created_on for all older rows of this order that are missing it
+        if created_on and order_hash:
+            db.execute(
+                "UPDATE checks SET created_on=? WHERE order_hash=? AND created_on IS NULL",
+                (created_on[:10], order_hash)
+            )
 
         _save_step_durations(db, order_hash, model, dest_country, steps, step_dates)
         db.commit()
