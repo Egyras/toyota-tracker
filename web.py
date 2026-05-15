@@ -183,21 +183,13 @@ def get_stats_data():
         FROM step_durations WHERE date_left IS NULL AND date_entered IS NOT NULL
         ORDER BY days_so_far DESC LIMIT 30
     """).fetchall()
-    # Average days from order to buildInProgress start
-    order_to_factory = db.execute("""
-        SELECT ROUND(AVG(
-            julianday(sd.date_entered) - julianday(substr(c.created_on,1,10))
-        ),1) avg_days
-        FROM step_durations sd
-        JOIN checks c ON sd.order_hash = c.order_hash
-        WHERE sd.step = 'buildInProgress'
-          AND sd.date_entered IS NOT NULL
-          AND c.created_on IS NOT NULL
-    """).fetchone()[0]
+    countries = db.execute(
+        "SELECT COUNT(DISTINCT dest_country) FROM checks WHERE dest_country != '' AND dest_country IS NOT NULL"
+    ).fetchone()[0]
     return dict(total=total, by_model=by_model, by_status=by_status,
                 by_country=by_country, delayed=delayed, damaged=damaged,
                 recent=recent, step_avgs=step_avgs, step_current=step_current,
-                order_to_factory=order_to_factory)
+                countries=countries)
 
 # ── Templates ─────────────────────────────────────────────────────────────────
 
@@ -564,16 +556,14 @@ STATS_PAGE = BASE + """
   <div class="stat-grid">
     <div class="stat-card"><div class="stat-num">{{ total }}</div>
       <div class="stat-lbl">Unique orders</div></div>
+    <div class="stat-card"><div class="stat-num">{{ countries }}</div>
+      <div class="stat-lbl">Countries</div></div>
     <div class="stat-card"><div class="stat-num">{{ delayed }}</div>
       <div class="stat-lbl">Delayed</div></div>
     <div class="stat-card"><div class="stat-num">{{ damaged }}</div>
       <div class="stat-lbl">Damage codes</div></div>
     <div class="stat-card"><div class="stat-num">{{ pct_delayed }}%</div>
       <div class="stat-lbl">Delay rate</div></div>
-    <div class="stat-card">
-      <div class="stat-num">{{ order_to_factory or '—' }}</div>
-      <div class="stat-lbl">Avg days order → factory</div>
-    </div>
   </div>
 
   <div class="card">
