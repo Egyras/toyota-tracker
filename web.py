@@ -210,6 +210,8 @@ def get_stats_data():
     for r in order_journeys_raw:
         try:
             steps = json.loads(r['steps_json']) if r['steps_json'] else {}
+            if not isinstance(steps, dict):
+                steps = {}
         except Exception:
             steps = {}
         # Build simple list of (step_name, status) for template
