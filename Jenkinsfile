@@ -62,7 +62,7 @@ pipeline {
                     docker run -d \
                         --name    toyota-tracker \
                         --restart unless-stopped \
-                        -p        8888:8080 \
+                        -p        8889:8080 \
                         -e        DB_PATH=/data/stats.db \
                         -v        toyota-tracker-data:/data \
                         ${IMAGE}:${TAG}
