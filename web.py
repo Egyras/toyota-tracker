@@ -367,7 +367,11 @@ TRACKER_PAGE = BASE + """
       </div>
       <div class="info-row">
         <span class="info-label">Order date</span>
-        <span class="info-value">{{ od.orderDate or '—' }}</span>
+        <span class="info-value">
+          {% if order._created_on %}
+            {{ order._created_on[:10] }}
+          {% else %}—{% endif %}
+        </span>
       </div>
     </div>
   </div>
@@ -588,6 +592,16 @@ def index():
             )
 
             session = ToyotaSession(username, password)
+
+            # Fetch full order objects (not just IDs) to get createdOn
+            import requests as _req
+            _orders_resp = session.session.get(
+                session.ORDERS_URL,
+                params={"displayPreApprovedCars": "true", "displayVOTCars": "true"},
+                timeout=10
+            ).json()
+            _order_dates = {o["id"]: o.get("createdOn", "") for o in _orders_resp}
+
             for oid in session.fetch_orders():
                 details    = session.fetch_order_details(oid)
                 dates_file = f"/data/{oid}.json"
@@ -596,7 +610,8 @@ def index():
                     with open(dates_file) as f:
                         step_dates = json.load(f)
                 save_stats(details, step_dates, today_only=True)
-                details['_step_dates'] = step_dates.get("steps", {})
+                details['_step_dates']   = step_dates.get("steps", {})
+                details['_created_on']   = _order_dates.get(oid, "")
                 orders.append(details)
 
         except Exception as e:
