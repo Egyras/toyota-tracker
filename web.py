@@ -26,7 +26,6 @@ def get_db():
                 engine        TEXT,
                 transmission  TEXT,
                 color         TEXT,
-                vin           TEXT,
                 status        TEXT,
                 destination   TEXT,
                 dest_country  TEXT,
@@ -219,9 +218,15 @@ a:hover{text-decoration:underline;}
             justify-content:center;font-size:15px;flex-shrink:0;}
 .route-name{font-weight:500;font-size:13px;}
 .route-type{font-size:11px;color:var(--muted);}
-.login-wrap{max-width:420px;margin:3rem auto;}
+.login-wrap{max-width:440px;margin:3rem auto;}
 .login-wrap h1{font-size:22px;font-weight:600;margin-bottom:.4rem;}
-.login-wrap .sub{color:var(--muted);font-size:13px;margin-bottom:2rem;}
+.login-wrap .sub{color:var(--muted);font-size:13px;margin-bottom:1.25rem;}
+.benefits{display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-bottom:1.5rem;}
+.benefit{background:var(--surface2);border:1px solid var(--border);
+         border-radius:8px;padding:.85rem;}
+.benefit-icon{font-size:16px;margin-bottom:4px;}
+.benefit-title{font-size:12px;font-weight:500;color:var(--text);margin-bottom:2px;}
+.benefit-desc{font-size:11px;color:var(--muted);line-height:1.5;}
 .form-group{margin-bottom:1rem;}
 .form-group label{display:block;font-size:12px;font-weight:500;color:var(--muted);
                   text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;}
@@ -290,7 +295,31 @@ TRACKER_PAGE = BASE + """
 {% if not username %}
   <div class="login-wrap">
     <h1>Toyota Order Tracker</h1>
-    <p class="sub">Enter your Toyota credentials to check your order status.</p>
+    <p class="sub">Know exactly where your car is — from the factory floor in Japan to your dealer's door.</p>
+
+    <div class="benefits">
+      <div class="benefit">
+        <div class="benefit-icon">📍</div>
+        <div class="benefit-title">Live route map</div>
+        <div class="benefit-desc">Every stop from Toyota City to your city on an interactive map</div>
+      </div>
+      <div class="benefit">
+        <div class="benefit-icon">📅</div>
+        <div class="benefit-title">Step timestamps</div>
+        <div class="benefit-desc">Exact dates per stage — Toyota's app doesn't show these</div>
+      </div>
+      <div class="benefit">
+        <div class="benefit-icon">📊</div>
+        <div class="benefit-title">Community stats</div>
+        <div class="benefit-desc">Compare wait times with other buyers across Europe</div>
+      </div>
+      <div class="benefit">
+        <div class="benefit-icon">🔗</div>
+        <div class="benefit-title">Shareable link</div>
+        <div class="benefit-desc">Send the URL to family — no app or account needed</div>
+      </div>
+    </div>
+
     <div class="card">
       <form method="POST">
         <div class="form-group">
@@ -304,6 +333,7 @@ TRACKER_PAGE = BASE + """
         <button type="submit" class="btn">Check my order →</button>
       </form>
     </div>
+
     <div class="privacy">
       <div class="privacy-title">🔒 How your credentials are handled</div>
       <p>Your credentials go directly to Toyota's API at <code>ssoms.toyota-europe.com</code>
@@ -375,9 +405,7 @@ TRACKER_PAGE = BASE + """
       <div class="info-row">
         <span class="info-label">Order date</span>
         <span class="info-value">
-          {% if order._created_on %}
-            {{ order._created_on[:10] }}
-          {% else %}—{% endif %}
+          {% if order._created_on %}{{ order._created_on[:10] }}{% else %}—{% endif %}
         </span>
       </div>
     </div>
@@ -401,8 +429,7 @@ TRACKER_PAGE = BASE + """
           <span class="badge badge-{{ s }}" style="margin-top:5px;">{{ s }}</span>
           {% if step_name in step_dates %}
             {% for event, date in step_dates[step_name].items() %}
-            <div style="font-size:11px;color:var(--red);margin-top:3px;">
-              {{ event }}: {{ date }}</div>
+            <div style="font-size:11px;color:var(--red);margin-top:3px;">{{ event }}: {{ date }}</div>
             {% endfor %}
           {% endif %}
         </div>
@@ -412,8 +439,14 @@ TRACKER_PAGE = BASE + """
   </div>
 
   {% if delivs %}
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <div class="card">
     <div class="card-title">Delivery route</div>
+
+    <div id="route-map" style="height:280px;border-radius:8px;margin-bottom:1.25rem;
+         border:1px solid var(--border);overflow:hidden;"></div>
+
     {% for d in delivs %}
     {% set v = d.isVisited %}
     <div class="route-item">
@@ -436,6 +469,35 @@ TRACKER_PAGE = BASE + """
     </div>
     {% endfor %}
   </div>
+
+  <script>
+  (function(){
+    var stops = [
+      {% for d in delivs %}
+      {lat:{{ d.locationLatitude }},lng:{{ d.locationLongitude }},
+       name:"{{ d.locationName }}, {{ d.countryName }}",
+       type:"{{ d.destinationType }}",visited:"{{ d.isVisited }}"}{% if not loop.last %},{% endif %}
+      {% endfor %}
+    ];
+    var map = L.map('route-map',{zoomControl:true,scrollWheelZoom:false});
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
+      attribution:'&copy; OpenStreetMap &copy; CARTO',maxZoom:18
+    }).addTo(map);
+    var latlngs = stops.map(function(s){return[s.lat,s.lng];});
+    L.polyline(latlngs,{color:'#e5001a',weight:2,dashArray:'6 6',opacity:.7}).addTo(map);
+    stops.forEach(function(s){
+      var color = s.visited==='visited'?'#3fb950':s.visited==='inTransit'?'#e5001a':'#8b949e';
+      var icon = L.divIcon({
+        className:'',
+        html:'<div style="width:14px;height:14px;border-radius:50%;background:'+color+';border:2px solid #fff;box-shadow:0 0 4px rgba(0,0,0,.5);"></div>',
+        iconSize:[14,14],iconAnchor:[7,7]
+      });
+      L.marker([s.lat,s.lng],{icon:icon}).addTo(map)
+       .bindPopup('<b>'+s.name+'</b><br>'+s.type);
+    });
+    map.fitBounds(latlngs,{padding:[30,30]});
+  })();
+  </script>
   {% endif %}
   {% endfor %}
 
@@ -600,8 +662,7 @@ def index():
 
             session = ToyotaSession(username, password)
 
-            # Fetch full order objects (not just IDs) to get createdOn
-            import requests as _req
+            # Fetch full order objects to get createdOn
             _orders_resp = session.session.get(
                 session.ORDERS_URL,
                 params={"displayPreApprovedCars": "true", "displayVOTCars": "true"},
@@ -617,8 +678,8 @@ def index():
                     with open(dates_file) as f:
                         step_dates = json.load(f)
                 save_stats(details, step_dates, today_only=True)
-                details['_step_dates']   = step_dates.get("steps", {})
-                details['_created_on']   = _order_dates.get(oid, "")
+                details['_step_dates'] = step_dates.get("steps", {})
+                details['_created_on'] = _order_dates.get(oid, "")
                 orders.append(details)
 
         except Exception as e:
