@@ -214,8 +214,12 @@ def get_stats_data():
                 steps = {}
         except Exception:
             steps = {}
-        # Build simple list of (step_name, status) for template
-        step_statuses = [(s, steps.get(s, {}).get('status', 'pending')) for s in all_steps]
+        # steps_json stores {"step": "status_string"} — values are strings not dicts
+        def get_status(v):
+            if isinstance(v, dict): return v.get('status', 'pending')
+            if isinstance(v, str):  return v
+            return 'pending'
+        step_statuses = [(s, get_status(steps.get(s, 'pending'))) for s in all_steps]
         order_journeys.append({
             'model':       r['model'],
             'dest_country':r['dest_country'],
