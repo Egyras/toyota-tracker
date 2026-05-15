@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Toyota Order Tracker — Flask web wrapper with anonymized stats collection."""
-import os, sys, re, html, json, sqlite3
+import os, sys, json, sqlite3, subprocess
 from datetime import datetime
 from flask import Flask, render_template_string, request, g
 
@@ -63,8 +63,6 @@ def days_between(d1, d2):
         return None
 
 def save_stats(order: dict, step_dates: dict, today_only: bool = True):
-    """Store anonymized snapshot — no credentials, no order IDs, no names stored.
-    today_only=True means one row per order per calendar day maximum."""
     try:
         import hashlib
         details    = order.get("orderDetails", {})
@@ -84,14 +82,10 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True):
 
         db = get_db()
 
-        # Skip if we already recorded this order today
         if today_only and order_hash:
             today = datetime.utcnow().strftime("%Y-%m-%d")
-            exists = db.execute(
-                "SELECT 1 FROM checks WHERE order_hash=? AND ts LIKE ?",
-                (order_hash, f"{today}%")
-            ).fetchone()
-            if exists:
+            if db.execute("SELECT 1 FROM checks WHERE order_hash=? AND ts LIKE ?",
+                          (order_hash, f"{today}%")).fetchone():
                 return
 
         db.execute("""
@@ -113,7 +107,6 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True):
                         for d in deliveries])
         ))
 
-        # Save step durations from toyota.py --store-dates JSON file
         if order_hash and step_dates:
             for step, dates in step_dates.get("steps", {}).items():
                 entered = dates.get("current") or dates.get("visited")
@@ -127,8 +120,7 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True):
                     ON CONFLICT(order_hash, step) DO UPDATE SET
                       date_left=excluded.date_left,
                       duration_days=excluded.duration_days
-                """, (order_hash, step, model, dest_country,
-                      entered, left, dur))
+                """, (order_hash, step, model, dest_country, entered, left, dur))
         db.commit()
     except Exception as e:
         print(f"[stats] save error: {e}", file=sys.stderr)
@@ -137,32 +129,27 @@ def get_stats_data():
     db    = get_db()
     total = (db.execute("SELECT COUNT(DISTINCT order_hash) FROM checks WHERE order_hash IS NOT NULL").fetchone()[0]
              or db.execute("SELECT COUNT(*) FROM checks").fetchone()[0])
-    by_model   = db.execute("SELECT model, COUNT(*) c FROM checks WHERE model IS NOT NULL GROUP BY model ORDER BY c DESC").fetchall()
-    by_status  = db.execute("SELECT status, COUNT(*) c FROM checks WHERE status IS NOT NULL GROUP BY status ORDER BY c DESC").fetchall()
-    delayed    = db.execute("SELECT COUNT(*) FROM checks WHERE is_delayed=1").fetchone()[0]
-    damaged    = db.execute("SELECT COUNT(*) FROM checks WHERE has_damage=1").fetchone()[0]
-    recent     = db.execute("SELECT ts, model, status, dest_country FROM checks ORDER BY id DESC LIMIT 20").fetchall()
-    by_country = db.execute("""
+    by_model     = db.execute("SELECT model, COUNT(*) c FROM checks WHERE model IS NOT NULL GROUP BY model ORDER BY c DESC").fetchall()
+    by_status    = db.execute("SELECT status, COUNT(*) c FROM checks WHERE status IS NOT NULL GROUP BY status ORDER BY c DESC").fetchall()
+    delayed      = db.execute("SELECT COUNT(*) FROM checks WHERE is_delayed=1").fetchone()[0]
+    damaged      = db.execute("SELECT COUNT(*) FROM checks WHERE has_damage=1").fetchone()[0]
+    recent       = db.execute("SELECT ts, model, status, dest_country FROM checks ORDER BY id DESC LIMIT 20").fetchall()
+    by_country   = db.execute("""
         SELECT dest_country, COUNT(*) total, SUM(is_delayed) delayed,
                GROUP_CONCAT(DISTINCT model) models
-        FROM checks
-        WHERE dest_country != '' AND dest_country IS NOT NULL
+        FROM checks WHERE dest_country != '' AND dest_country IS NOT NULL
         GROUP BY dest_country ORDER BY total DESC LIMIT 20
     """).fetchall()
-    step_avgs  = db.execute("""
-        SELECT step, COUNT(*) samples,
-               ROUND(AVG(duration_days),1) avg_days,
-               MIN(duration_days) min_days,
-               MAX(duration_days) max_days
-        FROM step_durations
-        WHERE duration_days IS NOT NULL AND duration_days >= 0
+    step_avgs    = db.execute("""
+        SELECT step, COUNT(*) samples, ROUND(AVG(duration_days),1) avg_days,
+               MIN(duration_days) min_days, MAX(duration_days) max_days
+        FROM step_durations WHERE duration_days IS NOT NULL AND duration_days >= 0
         GROUP BY step ORDER BY step
     """).fetchall()
     step_current = db.execute("""
         SELECT step, date_entered,
                CAST(julianday('now') - julianday(date_entered) AS INTEGER) days_so_far
-        FROM step_durations
-        WHERE date_left IS NULL AND date_entered IS NOT NULL
+        FROM step_durations WHERE date_left IS NULL AND date_entered IS NOT NULL
         ORDER BY days_so_far DESC LIMIT 30
     """).fetchall()
     return dict(total=total, by_model=by_model, by_status=by_status,
@@ -171,193 +158,401 @@ def get_stats_data():
 
 # ── Templates ─────────────────────────────────────────────────────────────────
 
-BASE_STYLE = """
+BASE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Toyota Order Tracker</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-* { box-sizing: border-box; }
-body { background:#0f0f1a; color:#ddd; font-family:monospace; margin:0; padding:1.5rem; }
-a { color:#cc0000; text-decoration:none; }
-h1 { color:#cc0000; margin-bottom:.2rem; font-size:1.6rem; }
-h2 { color:#aaa; font-size:.9rem; border-bottom:1px solid #1e1e2e; padding-bottom:.4rem; margin:2rem 0 .8rem; letter-spacing:.08em; }
-.nav { margin-bottom:1.5rem; font-size:.9rem; }
-.nav a { margin-right:1.2rem; }
-.meta { color:#555; font-size:.8rem; margin-bottom:1.5rem; }
-pre { background:#080816; border:1px solid #1e1e2e; padding:1.2rem; border-radius:6px;
-      white-space:pre-wrap; word-break:break-word; font-size:.85rem; line-height:1.7; }
-table { border-collapse:collapse; width:100%; }
-th { color:#cc0000; text-align:left; padding:.4rem .8rem; border-bottom:1px solid #1e1e2e;
-     font-size:.75rem; text-transform:uppercase; letter-spacing:.07em; }
-td { padding:.35rem .8rem; border-bottom:1px solid #111; font-size:.82rem; }
-tr:hover td { background:#0d0d1e; }
-.stat-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:.8rem; margin:1rem 0 1.5rem; }
-.stat-box  { background:#0d0d1e; border:1px solid #1e1e2e; border-radius:6px; padding:.9rem; text-align:center; }
-.stat-box .num { font-size:2rem; color:#cc0000; font-weight:bold; }
-.stat-box .lbl { font-size:.7rem; color:#555; margin-top:.2rem; }
-.section { background:#0d0d1e; border:1px solid #1e1e2e; border-radius:6px; padding:1.1rem 1.2rem; margin-bottom:1.2rem; }
-.bar-wrap { margin:.4rem 0; }
-.bar-label { font-size:.8rem; color:#888; margin-bottom:.2rem; display:flex; justify-content:space-between; align-items:baseline; }
-.bar-label .val { color:#ccc; font-weight:bold; font-size:.85rem; }
-.bar-label .sub { color:#444; font-size:.72rem; font-weight:normal; margin-left:.5rem; }
-.bar-bg   { background:#080816; border-radius:3px; height:10px; }
-.bar-red  { background:#cc0000; border-radius:3px; height:10px; }
-.bar-blue { background:#1e3a6e; border-radius:3px; height:10px; }
-.bar-models { font-size:.7rem; color:#333; margin-top:.15rem; }
-.badge { display:inline-block; padding:.12rem .5rem; border-radius:3px; font-size:.72rem; }
-.badge-current { background:#2a1010; color:#cc4444; }
-.badge-pending  { background:#111; color:#444; }
-.badge-visited  { background:#0f1f0f; color:#4a8f4a; }
-input[type=text],input[type=password] {
-  background:#080816; border:1px solid #2a2a3a; color:#eee;
-  padding:.4rem .8rem; border-radius:4px; width:280px; margin-bottom:.6rem; display:block; }
-input[type=submit] { background:#cc0000; border:none; color:#fff;
-  padding:.5rem 1.5rem; border-radius:4px; cursor:pointer; font-size:.95rem; margin-top:.4rem; }
-label { color:#888; font-size:.85rem; margin-bottom:.2rem; display:block; }
+:root{--bg:#0d1117;--surface:#161b22;--surface2:#21262d;--border:#30363d;
+      --red:#e5001a;--red-dim:#7d0010;--text:#e6edf3;--muted:#8b949e;
+      --green:#3fb950;--amber:#d29922;--radius:10px;}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);
+     min-height:100vh;font-size:14px;line-height:1.6;}
+a{color:var(--red);text-decoration:none;}
+a:hover{text-decoration:underline;}
+.nav{border-bottom:1px solid var(--border);padding:0 2rem;
+     display:flex;align-items:center;gap:2rem;height:56px;}
+.nav-brand{font-weight:600;font-size:15px;color:var(--text);
+           display:flex;align-items:center;gap:8px;}
+.nav-links{display:flex;gap:1.5rem;margin-left:auto;}
+.nav-links a{color:var(--muted);font-size:13px;}
+.nav-links a:hover{color:var(--text);text-decoration:none;}
+.container{max-width:860px;margin:0 auto;padding:2rem;}
+.card{background:var(--surface);border:1px solid var(--border);
+      border-radius:var(--radius);padding:1.5rem;margin-bottom:1.25rem;}
+.card-title{font-size:11px;font-weight:600;color:var(--muted);
+            text-transform:uppercase;letter-spacing:.07em;margin-bottom:1rem;}
+.badge{display:inline-flex;align-items:center;padding:3px 10px;
+       border-radius:20px;font-size:12px;font-weight:500;}
+.badge-current,.badge-processingorder{background:rgba(229,0,26,.15);color:#ff6b7a;border:1px solid var(--red-dim);}
+.badge-visited{background:rgba(63,185,80,.12);color:var(--green);border:1px solid #2ea043;}
+.badge-pending{background:var(--surface2);color:var(--muted);border:1px solid var(--border);}
+.badge-delayed{background:rgba(210,153,34,.12);color:var(--amber);border:1px solid #9e6a03;}
+.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:.6rem 2rem;}
+.info-row{display:flex;flex-direction:column;gap:2px;padding:.5rem 0;
+          border-bottom:1px solid var(--border);}
+.info-row:last-child{border:none;}
+.info-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;}
+.info-value{font-size:14px;font-weight:500;color:var(--text);}
+.timeline{display:flex;flex-direction:column;}
+.step-item{display:flex;align-items:flex-start;gap:14px;padding:.65rem 0;position:relative;}
+.step-item:not(:last-child)::after{content:'';position:absolute;left:11px;top:30px;
+  width:2px;height:calc(100% - 4px);background:var(--border);}
+.step-dot{width:24px;height:24px;border-radius:50%;flex-shrink:0;z-index:1;
+          display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;}
+.dot-current{background:var(--red);box-shadow:0 0 0 4px rgba(229,0,26,.2);
+             animation:pulse 2s ease-in-out infinite;}
+.dot-visited{background:var(--green);}
+.dot-pending{background:var(--surface2);border:2px solid var(--border);}
+.step-name{font-weight:500;font-size:14px;}
+.step-meta{font-size:12px;color:var(--muted);margin-top:1px;}
+.route-item{display:flex;align-items:center;gap:12px;padding:.55rem 0;
+            border-bottom:1px solid var(--border);}
+.route-item:last-child{border:none;}
+.route-icon{width:32px;height:32px;border-radius:6px;background:var(--surface2);
+            border:1px solid var(--border);display:flex;align-items:center;
+            justify-content:center;font-size:15px;flex-shrink:0;}
+.route-name{font-weight:500;font-size:13px;}
+.route-type{font-size:11px;color:var(--muted);}
+.login-wrap{max-width:420px;margin:3rem auto;}
+.login-wrap h1{font-size:22px;font-weight:600;margin-bottom:.4rem;}
+.login-wrap .sub{color:var(--muted);font-size:13px;margin-bottom:2rem;}
+.form-group{margin-bottom:1rem;}
+.form-group label{display:block;font-size:12px;font-weight:500;color:var(--muted);
+                  text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;}
+.form-group input{width:100%;background:var(--surface2);border:1px solid var(--border);
+                  color:var(--text);padding:9px 12px;border-radius:8px;font-size:14px;
+                  font-family:'Inter',sans-serif;outline:none;transition:border-color .15s;}
+.form-group input:focus{border-color:var(--red);}
+.btn{background:var(--red);color:#fff;border:none;padding:10px 20px;
+     border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;
+     width:100%;font-family:'Inter',sans-serif;transition:opacity .15s;}
+.btn:hover{opacity:.88;}
+.privacy{background:var(--surface2);border:1px solid var(--border);
+         border-radius:var(--radius);padding:1.2rem;margin-top:1.5rem;}
+.privacy-title{font-size:11px;font-weight:600;color:var(--muted);
+               text-transform:uppercase;letter-spacing:.07em;margin-bottom:.7rem;}
+.privacy p{font-size:12px;color:var(--muted);line-height:1.7;margin-bottom:.5rem;}
+.privacy p:last-child{margin-bottom:0;}
+.privacy code{background:var(--bg);padding:1px 5px;border-radius:4px;
+              font-size:11px;color:var(--text);}
+.alert{background:rgba(229,0,26,.1);border:1px solid var(--red-dim);
+       border-radius:var(--radius);padding:1rem;color:#ff6b7a;font-size:13px;}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+           gap:.75rem;margin-bottom:1.5rem;}
+.stat-card{background:var(--surface);border:1px solid var(--border);
+           border-radius:var(--radius);padding:1.1rem;}
+.stat-num{font-size:28px;font-weight:600;color:var(--red);line-height:1;}
+.stat-lbl{font-size:11px;color:var(--muted);margin-top:4px;}
+.bar-row{margin:.5rem 0;}
+.bar-head{display:flex;justify-content:space-between;font-size:12px;
+          color:var(--muted);margin-bottom:4px;}
+.bar-head span:last-child{font-weight:600;color:var(--text);}
+.bar-bg{background:var(--surface2);border-radius:3px;height:8px;}
+.bar-fill{background:var(--red);border-radius:3px;height:8px;}
+.bar-fill-blue{background:#1f6feb;border-radius:3px;height:8px;}
+.bar-sub{font-size:10px;color:#3d444d;margin-top:2px;}
+.data-table{width:100%;border-collapse:collapse;}
+.data-table th{font-size:11px;font-weight:600;color:var(--muted);text-align:left;
+               padding:7px 10px;border-bottom:1px solid var(--border);
+               text-transform:uppercase;letter-spacing:.05em;}
+.data-table td{padding:7px 10px;border-bottom:1px solid var(--border);font-size:13px;}
+.data-table tr:last-child td{border:none;}
+.data-table tr:hover td{background:var(--surface2);}
+.section-head{font-size:13px;font-weight:600;color:var(--text);
+              margin-bottom:1rem;padding-bottom:.6rem;border-bottom:1px solid var(--border);}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 4px rgba(229,0,26,.2)}50%{box-shadow:0 0 0 8px rgba(229,0,26,.05)}}
 </style>
-"""
-
-TRACKER_PAGE = BASE_STYLE + """
-<div class="nav">
-  <a href="/">🚗 Tracker</a>
-  <a href="/stats">📊 Statistics</a>
-  <a href="https://github.com/Egyras/toyota-tracker" target="_blank">⚙ Source code</a>
-</div>
-<h1>Toyota Order Tracker</h1>
-<p class="meta">Check your Toyota order status · built for the community</p>
-{% if not username %}
-<form method="POST" style="max-width:320px">
-  <label>Toyota account email</label>
-  <input type="text" name="username" placeholder="your@email.com" required>
-  <label>Password</label>
-  <input type="password" name="password" required>
-  <input type="submit" value="Check my order →">
-</form>
-
-<div style="margin-top:2rem;max-width:520px;border:1px solid #1e1e2e;border-radius:6px;padding:1.1rem 1.2rem;font-size:.82rem;line-height:1.8;color:#555;">
-  <div style="color:#aaa;font-size:.8rem;letter-spacing:.07em;margin-bottom:.7rem;">🔒 HOW YOUR CREDENTIALS ARE HANDLED</div>
-  <p style="margin:0 0 .6rem;">Your email and password are sent directly to Toyota's official API at
-  <code style="color:#888;">ssoms.toyota-europe.com</code> — the same endpoint the Toyota website uses.
-  They are never written to disk, never logged, and never stored in any database.</p>
-  <p style="margin:0 0 .6rem;">Once Toyota returns your order data, the credentials are discarded.
-  Only anonymized order details are saved for statistics: vehicle model, current step,
-  destination country, and delay/damage flags. No name, no email, no order ID is stored.</p>
-  <p style="margin:0;">You can verify this yourself by reading the full source code —
-  <a href="https://github.com/Egyras/toyota-tracker/blob/main/web.py" target="_blank" style="color:#666;">web.py on GitHub</a>.
-  The relevant function is <code style="color:#888;">save_stats()</code>.</p>
-</div>
-{% else %}
-<pre>{{ output }}</pre>
-<p style="margin-top:1rem;"><a href="/">← Check again</a> &nbsp; <a href="/stats">📊 Global stats</a></p>
-{% endif %}
-"""
-
-STATS_PAGE = BASE_STYLE + """
-<div class="nav"><a href="/">🚗 Tracker</a><a href="/stats">📊 Statistics</a></div>
-<h1>📊 Global Order Statistics</h1>
-<p class="meta">Anonymized · no credentials or personal info stored · updates on each login</p>
-
-<div class="stat-grid">
-  <div class="stat-box"><div class="num">{{ total }}</div><div class="lbl">Unique orders</div></div>
-  <div class="stat-box"><div class="num">{{ delayed }}</div><div class="lbl">Delayed</div></div>
-  <div class="stat-box"><div class="num">{{ damaged }}</div><div class="lbl">Damage codes</div></div>
-  <div class="stat-box"><div class="num">{{ pct_delayed }}%</div><div class="lbl">Delay rate</div></div>
-</div>
-
-<h2>⏱ HOW LONG DOES EACH STEP TAKE?</h2>
-<div class="section">
-{% if step_avgs %}
-  {% set max_avg = namespace(v=1) %}
-  {% for row in step_avgs %}{% if row['avg_days'] > max_avg.v %}{% set max_avg.v = row['avg_days'] %}{% endif %}{% endfor %}
-  {% for row in step_avgs %}
-  {% set pct = ((row['avg_days'] / max_avg.v) * 100)|int %}
-  <div class="bar-wrap">
-    <div class="bar-label">
-      <span>{{ row['step'] }}</span>
-      <span class="val">~{{ row['avg_days'] }} days
-        <span class="sub">min {{ row['min_days'] }} / max {{ row['max_days'] }} · {{ row['samples'] }} orders</span>
-      </span>
-    </div>
-    <div class="bar-bg"><div class="bar-blue" style="width:{{ pct }}%"></div></div>
+</head>
+<body>
+<nav class="nav">
+  <div class="nav-brand">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e5001a" stroke-width="2.5">
+      <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+    </svg>
+    Toyota Tracker
   </div>
+  <div class="nav-links">
+    <a href="/">Tracker</a>
+    <a href="/stats">Statistics</a>
+    <a href="https://github.com/Egyras/toyota-tracker" target="_blank">Source ↗</a>
+  </div>
+</nav>
+"""
+
+TRACKER_PAGE = BASE + """
+<div class="container">
+{% if not username %}
+  <div class="login-wrap">
+    <h1>Toyota Order Tracker</h1>
+    <p class="sub">Enter your toyota.lt credentials to check your order status.</p>
+    <div class="card">
+      <form method="POST">
+        <div class="form-group">
+          <label>Email address</label>
+          <input type="email" name="username" placeholder="your@email.com" required autofocus>
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" name="password" required>
+        </div>
+        <button type="submit" class="btn">Check my order →</button>
+      </form>
+    </div>
+    <div class="privacy">
+      <div class="privacy-title">🔒 How your credentials are handled</div>
+      <p>Your credentials go directly to Toyota's API at <code>ssoms.toyota-europe.com</code>
+         — never written to disk, never logged, never stored.</p>
+      <p>Only anonymized stats are saved: model, step, country, delay flag.
+         No name, email, or order ID is stored. See
+         <a href="https://github.com/Egyras/toyota-tracker/blob/main/web.py" target="_blank">
+         save_stats()</a> in the source code.</p>
+    </div>
+  </div>
+
+{% elif error %}
+  <div class="login-wrap">
+    <div class="alert">⚠ {{ error }}</div>
+    <p style="margin-top:1rem;font-size:13px;"><a href="/">← Try again</a></p>
+  </div>
+
+{% else %}
+  {% for order in orders %}
+  {% set od = order.orderDetails %}
+  {% set st = order.currentStatus %}
+  {% set steps = order.preprocessed.steps if order.preprocessed else {} %}
+  {% set delivs = order.intermediateDeliveries or [] %}
+
+  <div style="display:flex;align-items:center;justify-content:space-between;
+              margin-bottom:1.25rem;flex-wrap:wrap;gap:.5rem;">
+    <div>
+      <div style="font-size:20px;font-weight:600;">{{ od.vehicleModel }}</div>
+      <div style="font-size:12px;color:var(--muted);margin-top:2px;">
+        Order {{ od.orderId }}</div>
+    </div>
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;">
+      {% if st.isDelayed %}<span class="badge badge-delayed">⚠ Delayed</span>{% endif %}
+      {% if st.damageCode %}<span class="badge badge-delayed">⚡ {{ st.damageCode }}</span>{% endif %}
+      <span class="badge badge-current">{{ st.currentStatus }}</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Vehicle details</div>
+    <div class="info-grid">
+      <div class="info-row">
+        <span class="info-label">Engine</span>
+        <span class="info-value">{{ od.engine or '—' }}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Transmission</span>
+        <span class="info-value">{{ od.transmission or '—' }}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Colour</span>
+        <span class="info-value">{{ od.vehicleExternalColor or '—' }}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">VIN</span>
+        <span class="info-value">{{ od.vin or 'Not yet assigned' }}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Est. delivery</span>
+        <span class="info-value">{{ order.etaToFinalDestination or 'N/A' }}</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">Order date</span>
+        <span class="info-value">{{ od.orderDate or '—' }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Order progress</div>
+    <div class="timeline">
+      {% for step_name, step_data in steps.items() %}
+      {% set s = step_data.status %}
+      <div class="step-item">
+        <div class="step-dot
+          {% if s == 'current' %}dot-current{% elif s == 'visited' %}dot-visited{% else %}dot-pending{% endif %}">
+          {% if s == 'visited' %}✓{% elif s == 'current' %}●{% endif %}
+        </div>
+        <div style="flex:1;padding-top:2px;">
+          <div class="step-name">{{ step_name }}</div>
+          {% if step_data.location %}
+          <div class="step-meta">{{ step_data.location }}</div>
+          {% endif %}
+          <span class="badge badge-{{ s }}" style="margin-top:5px;">{{ s }}</span>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  {% if delivs %}
+  <div class="card">
+    <div class="card-title">Delivery route</div>
+    {% for d in delivs %}
+    {% set v = d.isVisited %}
+    <div class="route-item">
+      <div class="route-icon">
+        {% if d.destinationType == 'FACTORY' %}🏭
+        {% elif d.destinationType == 'HUB' %}🔀
+        {% elif d.destinationType == 'TRANSIT' %}🚢
+        {% elif d.destinationType == 'DESTINATION' %}📍
+        {% else %}📦{% endif %}
+      </div>
+      <div style="flex:1;">
+        <div class="route-name">{{ d.locationName }}, {{ d.countryName }}</div>
+        <div class="route-type">{{ d.destinationType }}
+          {% if d.transportMethod %} · {{ d.transportMethod }}{% endif %}</div>
+      </div>
+      <span class="badge
+        {% if v == 'visited' %}badge-visited
+        {% elif v == 'inTransit' %}badge-current
+        {% else %}badge-pending{% endif %}">{{ v }}</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
   {% endfor %}
-  {% if step_current %}
-  <div style="border-top:1px solid #1e1e2e;margin-top:1rem;padding-top:.9rem;">
-    <div style="font-size:.72rem;color:#444;margin-bottom:.6rem;letter-spacing:.07em;">CURRENTLY IN PROGRESS</div>
-    <table>
-      <tr><th>Step</th><th>Days so far</th><th>Since</th></tr>
-      {% for row in step_current %}
+
+  <p style="margin-top:1rem;font-size:13px;color:var(--muted);">
+    <a href="/">← Check again</a> &nbsp;·&nbsp;
+    <a href="/stats">📊 Global statistics</a>
+  </p>
+{% endif %}
+</div></body></html>
+"""
+
+STATS_PAGE = BASE + """
+<div class="container">
+  <div style="margin-bottom:1.5rem;">
+    <div style="font-size:20px;font-weight:600;">Global Statistics</div>
+    <div style="font-size:12px;color:var(--muted);margin-top:3px;">
+      Anonymized · no credentials or personal info stored
+    </div>
+  </div>
+
+  <div class="stat-grid">
+    <div class="stat-card"><div class="stat-num">{{ total }}</div>
+      <div class="stat-lbl">Unique orders</div></div>
+    <div class="stat-card"><div class="stat-num">{{ delayed }}</div>
+      <div class="stat-lbl">Delayed</div></div>
+    <div class="stat-card"><div class="stat-num">{{ damaged }}</div>
+      <div class="stat-lbl">Damage codes</div></div>
+    <div class="stat-card"><div class="stat-num">{{ pct_delayed }}%</div>
+      <div class="stat-lbl">Delay rate</div></div>
+  </div>
+
+  <div class="card">
+    <div class="section-head">⏱ How long does each step take?</div>
+    {% if step_avgs %}
+      {% set max_avg = namespace(v=1) %}
+      {% for r in step_avgs %}{% if r['avg_days'] > max_avg.v %}{% set max_avg.v = r['avg_days'] %}{% endif %}{% endfor %}
+      {% for r in step_avgs %}
+      {% set pct = ((r['avg_days'] / max_avg.v) * 100)|int %}
+      <div class="bar-row">
+        <div class="bar-head">
+          <span>{{ r['step'] }}</span>
+          <span>~{{ r['avg_days'] }} days
+            <span style="color:var(--muted);font-weight:400;font-size:11px;">
+              min {{ r['min_days'] }} / max {{ r['max_days'] }} · {{ r['samples'] }} orders
+            </span>
+          </span>
+        </div>
+        <div class="bar-bg"><div class="bar-fill-blue" style="width:{{ pct }}%"></div></div>
+      </div>
+      {% endfor %}
+      {% if step_current %}
+      <div style="margin-top:1.25rem;padding-top:1rem;border-top:1px solid var(--border);">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:.75rem;
+                    text-transform:uppercase;letter-spacing:.05em;">Currently in progress</div>
+        <table class="data-table">
+          <tr><th>Step</th><th>Days so far</th><th>Since</th></tr>
+          {% for r in step_current %}
+          <tr>
+            <td>{{ r['step'] }}</td>
+            <td><span class="badge badge-current">{{ r['days_so_far'] }}d</span></td>
+            <td style="color:var(--muted);">{{ r['date_entered'] }}</td>
+          </tr>
+          {% endfor %}
+        </table>
+      </div>
+      {% endif %}
+    {% else %}
+      <p style="color:var(--muted);font-size:13px;">No duration data yet.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <div class="section-head">🌍 By destination country</div>
+    {% if by_country %}
+      {% set max_c = by_country[0]['total'] %}
+      {% for r in by_country %}
+      {% set pct  = ((r['total'] / max_c) * 100)|int %}
+      {% set dpct = ((r['delayed'] / r['total']) * 100)|int if r['total'] else 0 %}
+      <div class="bar-row" style="margin-bottom:.85rem;">
+        <div class="bar-head">
+          <span>{{ r['dest_country'] }}</span>
+          <span>{{ r['total'] }}
+            {% if dpct > 0 %}
+            <span style="color:var(--amber);font-weight:400;font-size:11px;">· {{ dpct }}% delayed</span>
+            {% endif %}
+          </span>
+        </div>
+        <div class="bar-bg"><div class="bar-fill" style="width:{{ pct }}%"></div></div>
+        <div class="bar-sub">{{ r['models'] }}</div>
+      </div>
+      {% endfor %}
+    {% else %}
+      <p style="color:var(--muted);font-size:13px;">No country data yet.</p>
+    {% endif %}
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.25rem;">
+    <div class="card">
+      <div class="section-head">📋 By current status</div>
+      {% set max_s = namespace(v=1) %}
+      {% for r in by_status %}{% if r['c'] > max_s.v %}{% set max_s.v = r['c'] %}{% endif %}{% endfor %}
+      {% for r in by_status %}
+      {% set pct = ((r['c'] / max_s.v) * 100)|int %}
+      <div class="bar-row">
+        <div class="bar-head"><span>{{ r['status'] }}</span><span>{{ r['c'] }}</span></div>
+        <div class="bar-bg"><div class="bar-fill" style="width:{{ pct }}%;opacity:.7"></div></div>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="card">
+      <div class="section-head">🚗 By model</div>
+      <table class="data-table">
+        <tr><th>Model</th><th>Orders</th></tr>
+        {% for r in by_model %}
+        <tr><td>{{ r['model'] }}</td><td>{{ r['c'] }}</td></tr>
+        {% endfor %}
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="section-head">🕐 Recent checks</div>
+    <table class="data-table">
+      <tr><th>Time (UTC)</th><th>Model</th><th>Status</th><th>Country</th></tr>
+      {% for r in recent %}
       <tr>
-        <td>{{ row['step'] }}</td>
-        <td style="color:#cc0000;">{{ row['days_so_far'] }}d</td>
-        <td style="color:#333;">{{ row['date_entered'] }}</td>
+        <td style="color:var(--muted);">{{ r['ts'][:16] }}</td>
+        <td>{{ r['model'] or '—' }}</td>
+        <td><span class="badge badge-pending">{{ r['status'] or '—' }}</span></td>
+        <td>{{ r['dest_country'] or '—' }}</td>
       </tr>
       {% endfor %}
     </table>
   </div>
-  {% endif %}
-{% else %}
-  <p style="color:#444;font-size:.85rem;">No duration data yet — populates as orders advance through steps.</p>
-{% endif %}
-</div>
-
-<h2>🌍 BY DESTINATION COUNTRY</h2>
-<div class="section">
-{% if by_country %}
-  {% set max_c = by_country[0]['total'] %}
-  {% for row in by_country %}
-  {% set pct  = ((row['total'] / max_c) * 100)|int %}
-  {% set dpct = ((row['delayed'] / row['total']) * 100)|int if row['total'] else 0 %}
-  <div class="bar-wrap" style="margin-bottom:.8rem;">
-    <div class="bar-label">
-      <span>{{ row['dest_country'] }}</span>
-      <span class="val">{{ row['total'] }}
-        {% if dpct > 0 %}<span class="sub" style="color:#6a2a2a;">{{ dpct }}% delayed</span>{% endif %}
-      </span>
-    </div>
-    <div class="bar-bg"><div class="bar-red" style="width:{{ pct }}%"></div></div>
-    <div class="bar-models">{{ row['models'] }}</div>
-  </div>
-  {% endfor %}
-{% else %}
-  <p style="color:#444;font-size:.85rem;">No country data yet.</p>
-{% endif %}
-</div>
-
-<h2>📋 BY CURRENT STATUS</h2>
-<div class="section">
-{% set max_s = namespace(v=1) %}
-{% for row in by_status %}{% if row['c'] > max_s.v %}{% set max_s.v = row['c'] %}{% endif %}{% endfor %}
-{% for row in by_status %}
-{% set pct = ((row['c'] / max_s.v) * 100)|int %}
-<div class="bar-wrap">
-  <div class="bar-label"><span>{{ row['status'] }}</span><span class="val">{{ row['c'] }}</span></div>
-  <div class="bar-bg"><div class="bar-red" style="width:{{ pct }}%;opacity:.7"></div></div>
-</div>
-{% endfor %}
-</div>
-
-<h2>🚗 BY MODEL</h2>
-<div class="section">
-<table>
-<tr><th>Model</th><th>Orders</th></tr>
-{% for row in by_model %}
-<tr><td>{{ row['model'] }}</td><td>{{ row['c'] }}</td></tr>
-{% endfor %}
-</table>
-</div>
-
-<h2>🕐 RECENT CHECKS</h2>
-<div class="section">
-<table>
-<tr><th>Time (UTC)</th><th>Model</th><th>Status</th><th>Country</th></tr>
-{% for row in recent %}
-<tr>
-  <td style="color:#333">{{ row['ts'][:16] }}</td>
-  <td>{{ row['model'] or '—' }}</td>
-  <td><span class="badge badge-{{ row['status'] }}">{{ row['status'] or '—' }}</span></td>
-  <td>{{ row['dest_country'] or '—' }}</td>
-</tr>
-{% endfor %}
-</table>
-</div>
+</div></body></html>
 """
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -366,7 +561,8 @@ STATS_PAGE = BASE_STYLE + """
 def index():
     username = USERNAME
     password = PASSWORD
-    output   = None
+    orders   = []
+    error    = None
 
     if request.method == "POST":
         username = request.form.get("username", "")
@@ -377,7 +573,6 @@ def index():
             sys.path.insert(0, '/app')
             from toyota import ToyotaSession
 
-            # Single API session for stats collection
             session = ToyotaSession(username, password)
             for oid in session.fetch_orders():
                 details    = session.fetch_order_details(oid)
@@ -387,21 +582,20 @@ def index():
                     with open(dates_file) as f:
                         step_dates = json.load(f)
                 save_stats(details, step_dates, today_only=True)
+                orders.append(details)
 
-            # Use toyota.py for the nice formatted table output
-            import subprocess, re
-            result = subprocess.run(
+            # Background: update step dates file
+            subprocess.run(
                 [sys.executable, "/app/toyota.py", "--username", username,
                  "--password", password, "--store-dates"],
                 capture_output=True, text=True, timeout=60, cwd="/data"
             )
-            ansi = re.compile(r'\x1b\[[0-9;]*m')
-            output = html.escape(ansi.sub('', result.stdout or "No output."))
 
         except Exception as e:
-            output = html.escape(f"Error: {e}")
+            error = str(e)
 
-    return render_template_string(TRACKER_PAGE, output=output or "", username=username)
+    return render_template_string(TRACKER_PAGE,
+                                  orders=orders, username=username, error=error)
 
 @app.route("/stats")
 def stats():
