@@ -289,7 +289,7 @@ TRACKER_PAGE = BASE + """
 {% if not username %}
   <div class="login-wrap">
     <h1>Toyota Order Tracker</h1>
-    <p class="sub">Enter your toyota credentials to check your order status.</p>
+    <p class="sub">Enter your toyota.lt credentials to check your order status.</p>
     <div class="card">
       <form method="POST">
         <div class="form-group">
@@ -580,6 +580,13 @@ def index():
             sys.path.insert(0, '/app')
             from toyota import ToyotaSession
 
+            # Run --store-dates first so dates file is up to date before we read it
+            subprocess.run(
+                [sys.executable, "/app/toyota.py", "--username", username,
+                 "--password", password, "--store-dates"],
+                capture_output=True, text=True, timeout=60, cwd="/data"
+            )
+
             session = ToyotaSession(username, password)
             for oid in session.fetch_orders():
                 details    = session.fetch_order_details(oid)
@@ -591,13 +598,6 @@ def index():
                 save_stats(details, step_dates, today_only=True)
                 details['_step_dates'] = step_dates.get("steps", {})
                 orders.append(details)
-
-            # Background: update step dates file
-            subprocess.run(
-                [sys.executable, "/app/toyota.py", "--username", username,
-                 "--password", password, "--store-dates"],
-                capture_output=True, text=True, timeout=60, cwd="/data"
-            )
 
         except Exception as e:
             error = str(e)
