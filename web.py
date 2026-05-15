@@ -5,7 +5,6 @@ from datetime import datetime
 from flask import Flask, render_template_string, request, g
 
 app = Flask(__name__)
-app.jinja_env.filters['fromjson'] = json.loads
 
 USERNAME = os.environ.get("TOYOTA_USERNAME", "")
 PASSWORD = os.environ.get("TOYOTA_PASSWORD", "")
@@ -195,17 +194,33 @@ def get_stats_data():
         ORDER BY created_on ASC
     """).fetchall()
     # Per-order journey for the live tracking section
-    order_journeys = db.execute("""
+    order_journeys_raw = db.execute("""
         SELECT c.order_hash, c.model, c.dest_country, c.status,
-               c.created_on, c.ts,
-               c.steps_json
+               c.created_on, c.ts, c.steps_json
         FROM checks c
         INNER JOIN (
             SELECT order_hash, MAX(ts) ts FROM checks GROUP BY order_hash
         ) latest ON c.order_hash = latest.order_hash AND c.ts = latest.ts
         WHERE c.model IS NOT NULL
-        ORDER BY c.created_on ASC NULLS LAST, c.ts ASC
+        ORDER BY c.created_on ASC, c.ts ASC
     """).fetchall()
+    # Pre-parse steps_json so template doesn't need fromjson filter
+    order_journeys = []
+    all_steps = ['processedOrder','buildInProgress','leftTheFactory','inTransit','arrivedAtRetailer']
+    for r in order_journeys_raw:
+        try:
+            steps = json.loads(r['steps_json']) if r['steps_json'] else {}
+        except Exception:
+            steps = {}
+        # Build simple list of (step_name, status) for template
+        step_statuses = [(s, steps.get(s, {}).get('status', 'pending')) for s in all_steps]
+        order_journeys.append({
+            'model':       r['model'],
+            'dest_country':r['dest_country'],
+            'status':      r['status'],
+            'created_on':  r['created_on'],
+            'step_statuses': step_statuses,
+        })
     return dict(total=total, by_model=by_model, by_status=by_status,
                 by_country=by_country, delayed=delayed, damaged=damaged,
                 recent=recent, step_avgs=step_avgs, step_current=step_current,
@@ -659,74 +674,56 @@ STATS_PAGE = BASE + """
       Each anonymous order — where it is in the pipeline right now
     </div>
 
-    {% set all_steps = ['processedOrder','buildInProgress','leftTheFactory','inTransit','arrivedAtRetailer'] %}
-
     {% for r in order_journeys %}
-    {% set steps = r['steps_json']|tojson if r['steps_json'] else '{}' %}
     <div style="padding:.9rem 0;border-bottom:1px solid var(--border);">
 
-      <!-- Header row -->
       <div style="display:flex;align-items:center;justify-content:space-between;
-                  margin-bottom:.6rem;flex-wrap:wrap;gap:.4rem;">
+                  margin-bottom:.65rem;flex-wrap:wrap;gap:.4rem;">
         <div style="display:flex;align-items:center;gap:.6rem;">
-          <span style="font-size:13px;font-weight:500;">{{ r['model'] or '—' }}</span>
-          <span style="font-size:11px;color:var(--muted);">→ {{ r['dest_country'] or '—' }}</span>
+          <span style="font-size:13px;font-weight:500;">{{ r.model or '—' }}</span>
+          <span style="font-size:11px;color:var(--muted);">→ {{ r.dest_country or '—' }}</span>
         </div>
         <div style="display:flex;align-items:center;gap:.5rem;">
-          {% if r['created_on'] %}
-          <span style="font-size:11px;color:var(--muted);">ordered {{ r['created_on'] }}</span>
+          {% if r.created_on %}
+          <span style="font-size:11px;color:var(--muted);">ordered {{ r.created_on }}</span>
           {% endif %}
-          <span class="badge badge-pending" style="font-size:11px;">{{ r['status'] }}</span>
+          <span class="badge badge-pending" style="font-size:11px;">{{ r.status }}</span>
         </div>
       </div>
 
-      <!-- Step progress bar -->
-      <div style="display:flex;gap:3px;align-items:center;">
-        {% set step_data = r['steps_json'] %}
-        {% if step_data %}
-          {% set parsed = step_data | fromjson %}
-          {% for step in all_steps %}
-          {% set s = parsed.get(step, {}).get('status', 'pending') if parsed else 'pending' %}
-          <div style="flex:1;position:relative;" title="{{ step }}">
-            <div style="height:6px;border-radius:3px;
-              {% if s == 'visited' %}background:var(--green);
-              {% elif s == 'current' %}background:var(--red);
-              {% else %}background:var(--surface2);border:1px solid var(--border);{% endif %}">
-            </div>
-            {% if s == 'current' %}
-            <div style="position:absolute;top:-3px;left:50%;transform:translateX(-50%);
-                        width:12px;height:12px;border-radius:50%;background:var(--red);
-                        border:2px solid var(--bg);animation:pulse 2s ease-in-out infinite;">
-            </div>
-            {% endif %}
+      <div style="display:flex;gap:3px;align-items:center;margin-bottom:4px;">
+        {% for step_name, s in r.step_statuses %}
+        <div style="flex:1;position:relative;" title="{{ step_name }}">
+          <div style="height:8px;border-radius:3px;
+            {% if s == 'visited' %}background:var(--green);
+            {% elif s == 'current' %}background:var(--red);animation:pulse 2s ease-in-out infinite;
+            {% else %}background:var(--surface2);border:1px solid var(--border);{% endif %}">
           </div>
-          {% if not loop.last %}
-          <div style="width:4px;height:1px;background:var(--border);flex-shrink:0;"></div>
-          {% endif %}
-          {% endfor %}
+        </div>
+        {% if not loop.last %}
+        <div style="width:3px;height:1px;background:var(--border);flex-shrink:0;"></div>
         {% endif %}
+        {% endfor %}
       </div>
 
-      <!-- Step labels -->
-      <div style="display:flex;gap:3px;margin-top:4px;">
-        {% if step_data %}
-          {% set parsed = step_data | fromjson %}
-          {% for step in all_steps %}
-          {% set s = parsed.get(step, {}).get('status', 'pending') if parsed else 'pending' %}
-          <div style="flex:1;font-size:9px;color:
-            {% if s == 'visited' %}var(--green)
-            {% elif s == 'current' %}var(--red)
-            {% else %}#3d444d{% endif %};
-            text-align:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;">
-            {{ step | replace('Order','') | replace('InProgress',' Build') |
-               replace('TheFactory',' Left') | replace('Transit',' Transit') |
-               replace('AtRetailer',' Arrived') }}
-          </div>
-          {% if not loop.last %}
-          <div style="width:4px;flex-shrink:0;"></div>
-          {% endif %}
-          {% endfor %}
+      <div style="display:flex;gap:3px;">
+        {% for step_name, s in r.step_statuses %}
+        <div style="flex:1;font-size:9px;color:
+          {% if s == 'visited' %}var(--green)
+          {% elif s == 'current' %}var(--red)
+          {% else %}#3d444d{% endif %};
+          text-align:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;"
+          title="{{ step_name }}">
+          {{ step_name | replace('processedOrder','Ordered') |
+             replace('buildInProgress','Building') |
+             replace('leftTheFactory','Left Factory') |
+             replace('inTransit','In Transit') |
+             replace('arrivedAtRetailer','Arrived') }}
+        </div>
+        {% if not loop.last %}
+        <div style="width:3px;flex-shrink:0;"></div>
         {% endif %}
+        {% endfor %}
       </div>
     </div>
     {% endfor %}
