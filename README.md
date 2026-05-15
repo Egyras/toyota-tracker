@@ -24,19 +24,6 @@ Git push → Jenkins → Docker Hub → TrueNAS container
 | `Jenkinsfile` | CI/CD pipeline — build → push → deploy |
 | `docker-compose.yml` | Local development only |
 
-## Jenkins credentials required
-
-| ID | Type | Value |
-|---|---|---|
-| `dockerhub` | Username/Password | Docker Hub login for `vaikis` |
-
-## Local development
-
-```bash
-docker compose up --build
-# open http://localhost:8888
-```
-
 ## Stats
 
 Anonymous statistics collected per check (no credentials stored):
