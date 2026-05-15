@@ -27,6 +27,7 @@ def get_db():
                 transmission  TEXT,
                 color         TEXT,
                 status        TEXT,
+                created_on    TEXT,
                 destination   TEXT,
                 dest_country  TEXT,
                 is_delayed    INTEGER,
@@ -45,7 +46,13 @@ def get_db():
                 duration_days INTEGER,
                 UNIQUE(order_hash, step)
             );
+            -- migrate: add created_on if upgrading from older schema
+            CREATE TABLE IF NOT EXISTS _migrations (id INTEGER PRIMARY KEY);
         """)
+        # add created_on column if missing (safe on existing DBs)
+        cols = [r[1] for r in db.execute("PRAGMA table_info(checks)").fetchall()]
+        if 'created_on' not in cols:
+            db.execute("ALTER TABLE checks ADD COLUMN created_on TEXT")
         db.commit()
         g.db = db
     return g.db
@@ -62,7 +69,7 @@ def days_between(d1, d2):
     except Exception:
         return None
 
-def save_stats(order: dict, step_dates: dict, today_only: bool = True):
+def save_stats(order: dict, step_dates: dict, today_only: bool = True, created_on: str = ""):
     try:
         import hashlib
         details    = order.get("orderDetails", {})
@@ -86,18 +93,22 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True):
             today = datetime.utcnow().strftime("%Y-%m-%d")
             if db.execute("SELECT 1 FROM checks WHERE order_hash=? AND ts LIKE ?",
                           (order_hash, f"{today}%")).fetchone():
+                # Still update step_durations even if skipping checks insert
+                _save_step_durations(db, order_hash, model, dest_country, steps, step_dates)
+                db.commit()
                 return
 
         db.execute("""
             INSERT INTO checks
               (ts, order_hash, model, engine, transmission, color, status,
-               destination, dest_country, is_delayed, has_damage,
+               created_on, destination, dest_country, is_delayed, has_damage,
                steps_json, deliveries_json)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             datetime.utcnow().isoformat(), order_hash, model,
             details.get("engine"), details.get("transmission"),
             details.get("vehicleExternalColor"), status.get("currentStatus"),
+            created_on[:10] if created_on else None,
             dest, dest_country,
             1 if status.get("isDelayed") else 0,
             1 if status.get("damageCode") else 0,
@@ -107,23 +118,43 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True):
                         for d in deliveries])
         ))
 
-        if order_hash and step_dates:
-            for step, dates in step_dates.get("steps", {}).items():
-                entered = dates.get("current") or dates.get("visited")
-                left    = dates.get("visited") if "current" in dates else None
-                dur     = days_between(entered, left) if (entered and left) else None
-                db.execute("""
-                    INSERT INTO step_durations
-                      (order_hash, step, model, dest_country,
-                       date_entered, date_left, duration_days)
-                    VALUES (?,?,?,?,?,?,?)
-                    ON CONFLICT(order_hash, step) DO UPDATE SET
-                      date_left=excluded.date_left,
-                      duration_days=excluded.duration_days
-                """, (order_hash, step, model, dest_country, entered, left, dur))
+        _save_step_durations(db, order_hash, model, dest_country, steps, step_dates)
         db.commit()
     except Exception as e:
         print(f"[stats] save error: {e}", file=sys.stderr)
+
+def _save_step_durations(db, order_hash, model, dest_country, steps, step_dates):
+    """Save step durations from dates file AND from preprocessed step data."""
+    if not order_hash:
+        return
+
+    # From --store-dates JSON file (has exact calendar dates)
+    if step_dates:
+        for step, dates in step_dates.get("steps", {}).items():
+            entered = dates.get("current") or dates.get("visited")
+            left    = dates.get("visited") if "current" in dates else None
+            dur     = days_between(entered, left) if (entered and left) else None
+            db.execute("""
+                INSERT INTO step_durations
+                  (order_hash, step, model, dest_country,
+                   date_entered, date_left, duration_days)
+                VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(order_hash, step) DO UPDATE SET
+                  date_left=excluded.date_left,
+                  duration_days=excluded.duration_days
+            """, (order_hash, step, model, dest_country, entered, left, dur))
+
+    # From preprocessed steps — at minimum record which steps are visited/current
+    # even if we don't have exact dates yet
+    for step_name, step_data in steps.items():
+        s = step_data.get("status", "")
+        if s in ("visited", "current"):
+            db.execute("""
+                INSERT INTO step_durations
+                  (order_hash, step, model, dest_country)
+                VALUES (?,?,?,?)
+                ON CONFLICT(order_hash, step) DO NOTHING
+            """, (order_hash, step_name, model, dest_country))
 
 def get_stats_data():
     db    = get_db()
@@ -152,9 +183,21 @@ def get_stats_data():
         FROM step_durations WHERE date_left IS NULL AND date_entered IS NOT NULL
         ORDER BY days_so_far DESC LIMIT 30
     """).fetchall()
+    # Average days from order to buildInProgress start
+    order_to_factory = db.execute("""
+        SELECT ROUND(AVG(
+            julianday(sd.date_entered) - julianday(substr(c.created_on,1,10))
+        ),1) avg_days
+        FROM step_durations sd
+        JOIN checks c ON sd.order_hash = c.order_hash
+        WHERE sd.step = 'buildInProgress'
+          AND sd.date_entered IS NOT NULL
+          AND c.created_on IS NOT NULL
+    """).fetchone()[0]
     return dict(total=total, by_model=by_model, by_status=by_status,
                 by_country=by_country, delayed=delayed, damaged=damaged,
-                recent=recent, step_avgs=step_avgs, step_current=step_current)
+                recent=recent, step_avgs=step_avgs, step_current=step_current,
+                order_to_factory=order_to_factory)
 
 # ── Templates ─────────────────────────────────────────────────────────────────
 
@@ -163,7 +206,7 @@ BASE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Toyota Order Tracker</title>
+<title>Toyota Europe Order Tracker</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
 :root{--bg:#0d1117;--surface:#161b22;--surface2:#21262d;--border:#30363d;
@@ -280,7 +323,7 @@ a:hover{text-decoration:underline;}
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e5001a" stroke-width="2.5">
       <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
     </svg>
-    Toyota Tracker
+    Toyota Europe Tracker
   </div>
   <div class="nav-links">
     <a href="/">Tracker</a>
@@ -294,7 +337,7 @@ TRACKER_PAGE = BASE + """
 <div class="container">
 {% if not username %}
   <div class="login-wrap">
-    <h1>Toyota Order Tracker</h1>
+    <h1>Toyota Europe Order Tracker</h1>
     <p class="sub">Know exactly where your car is — from the factory floor in Japan to your dealer's door.</p>
 
     <div class="benefits">
@@ -512,7 +555,7 @@ TRACKER_PAGE = BASE + """
 STATS_PAGE = BASE + """
 <div class="container">
   <div style="margin-bottom:1.5rem;">
-    <div style="font-size:20px;font-weight:600;">Global Statistics</div>
+    <div style="font-size:20px;font-weight:600;">Toyota Europe — Global Statistics</div>
     <div style="font-size:12px;color:var(--muted);margin-top:3px;">
       Anonymized · no credentials or personal info stored
     </div>
@@ -527,6 +570,10 @@ STATS_PAGE = BASE + """
       <div class="stat-lbl">Damage codes</div></div>
     <div class="stat-card"><div class="stat-num">{{ pct_delayed }}%</div>
       <div class="stat-lbl">Delay rate</div></div>
+    <div class="stat-card">
+      <div class="stat-num">{{ order_to_factory or '—' }}</div>
+      <div class="stat-lbl">Avg days order → factory</div>
+    </div>
   </div>
 
   <div class="card">
@@ -677,7 +724,8 @@ def index():
                 if os.path.exists(dates_file):
                     with open(dates_file) as f:
                         step_dates = json.load(f)
-                save_stats(details, step_dates, today_only=True)
+                save_stats(details, step_dates, today_only=True,
+                           created_on=_order_dates.get(oid, ""))
                 details['_step_dates'] = step_dates.get("steps", {})
                 details['_created_on'] = _order_dates.get(oid, "")
                 orders.append(details)
