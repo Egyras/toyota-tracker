@@ -326,6 +326,7 @@ TRACKER_PAGE = BASE + """
   {% set st = order.currentStatus %}
   {% set steps = order.preprocessed.steps if order.preprocessed else {} %}
   {% set delivs = order.intermediateDeliveries or [] %}
+  {% set step_dates = order._step_dates if order._step_dates else {} %}
 
   <div style="display:flex;align-items:center;justify-content:space-between;
               margin-bottom:1.25rem;flex-wrap:wrap;gap:.5rem;">
@@ -387,6 +388,12 @@ TRACKER_PAGE = BASE + """
           <div class="step-meta">{{ step_data.location }}</div>
           {% endif %}
           <span class="badge badge-{{ s }}" style="margin-top:5px;">{{ s }}</span>
+          {% if step_name in step_dates %}
+            {% for event, date in step_dates[step_name].items() %}
+            <div style="font-size:11px;color:var(--red);margin-top:3px;">
+              {{ event }}: {{ date }}</div>
+            {% endfor %}
+          {% endif %}
         </div>
       </div>
       {% endfor %}
@@ -582,6 +589,7 @@ def index():
                     with open(dates_file) as f:
                         step_dates = json.load(f)
                 save_stats(details, step_dates, today_only=True)
+                details['_step_dates'] = step_dates.get("steps", {})
                 orders.append(details)
 
             # Background: update step dates file
