@@ -290,7 +290,7 @@ TRACKER_PAGE = BASE + """
 {% if not username %}
   <div class="login-wrap">
     <h1>Toyota Order Tracker</h1>
-    <p class="sub">Enter your toyota.lt credentials to check your order status.</p>
+    <p class="sub">Enter your Toyota credentials to check your order status.</p>
     <div class="card">
       <form method="POST">
         <div class="form-group">
