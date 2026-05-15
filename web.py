@@ -5,6 +5,7 @@ from datetime import datetime
 from flask import Flask, render_template_string, request, g
 
 app = Flask(__name__)
+app.jinja_env.filters['fromjson'] = json.loads
 
 USERNAME = os.environ.get("TOYOTA_USERNAME", "")
 PASSWORD = os.environ.get("TOYOTA_PASSWORD", "")
@@ -186,10 +187,30 @@ def get_stats_data():
     countries = db.execute(
         "SELECT COUNT(DISTINCT dest_country) FROM checks WHERE dest_country != '' AND dest_country IS NOT NULL"
     ).fetchone()[0]
+    order_dates = db.execute("""
+        SELECT created_on, model, dest_country
+        FROM checks
+        WHERE created_on IS NOT NULL
+        GROUP BY order_hash
+        ORDER BY created_on ASC
+    """).fetchall()
+    # Per-order journey for the live tracking section
+    order_journeys = db.execute("""
+        SELECT c.order_hash, c.model, c.dest_country, c.status,
+               c.created_on, c.ts,
+               c.steps_json
+        FROM checks c
+        INNER JOIN (
+            SELECT order_hash, MAX(ts) ts FROM checks GROUP BY order_hash
+        ) latest ON c.order_hash = latest.order_hash AND c.ts = latest.ts
+        WHERE c.model IS NOT NULL
+        ORDER BY c.created_on ASC NULLS LAST, c.ts ASC
+    """).fetchall()
     return dict(total=total, by_model=by_model, by_status=by_status,
                 by_country=by_country, delayed=delayed, damaged=damaged,
                 recent=recent, step_avgs=step_avgs, step_current=step_current,
-                countries=countries)
+                countries=countries, order_dates=order_dates,
+                order_journeys=order_journeys)
 
 # ── Templates ─────────────────────────────────────────────────────────────────
 
@@ -630,6 +651,87 @@ STATS_PAGE = BASE + """
       <p style="color:var(--muted);font-size:13px;">No country data yet.</p>
     {% endif %}
   </div>
+
+  {% if order_journeys %}
+  <div class="card">
+    <div class="section-head">🚗 Order journeys</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:1rem;">
+      Each anonymous order — where it is in the pipeline right now
+    </div>
+
+    {% set all_steps = ['processedOrder','buildInProgress','leftTheFactory','inTransit','arrivedAtRetailer'] %}
+
+    {% for r in order_journeys %}
+    {% set steps = r['steps_json']|tojson if r['steps_json'] else '{}' %}
+    <div style="padding:.9rem 0;border-bottom:1px solid var(--border);">
+
+      <!-- Header row -->
+      <div style="display:flex;align-items:center;justify-content:space-between;
+                  margin-bottom:.6rem;flex-wrap:wrap;gap:.4rem;">
+        <div style="display:flex;align-items:center;gap:.6rem;">
+          <span style="font-size:13px;font-weight:500;">{{ r['model'] or '—' }}</span>
+          <span style="font-size:11px;color:var(--muted);">→ {{ r['dest_country'] or '—' }}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:.5rem;">
+          {% if r['created_on'] %}
+          <span style="font-size:11px;color:var(--muted);">ordered {{ r['created_on'] }}</span>
+          {% endif %}
+          <span class="badge badge-pending" style="font-size:11px;">{{ r['status'] }}</span>
+        </div>
+      </div>
+
+      <!-- Step progress bar -->
+      <div style="display:flex;gap:3px;align-items:center;">
+        {% set step_data = r['steps_json'] %}
+        {% if step_data %}
+          {% set parsed = step_data | fromjson %}
+          {% for step in all_steps %}
+          {% set s = parsed.get(step, {}).get('status', 'pending') if parsed else 'pending' %}
+          <div style="flex:1;position:relative;" title="{{ step }}">
+            <div style="height:6px;border-radius:3px;
+              {% if s == 'visited' %}background:var(--green);
+              {% elif s == 'current' %}background:var(--red);
+              {% else %}background:var(--surface2);border:1px solid var(--border);{% endif %}">
+            </div>
+            {% if s == 'current' %}
+            <div style="position:absolute;top:-3px;left:50%;transform:translateX(-50%);
+                        width:12px;height:12px;border-radius:50%;background:var(--red);
+                        border:2px solid var(--bg);animation:pulse 2s ease-in-out infinite;">
+            </div>
+            {% endif %}
+          </div>
+          {% if not loop.last %}
+          <div style="width:4px;height:1px;background:var(--border);flex-shrink:0;"></div>
+          {% endif %}
+          {% endfor %}
+        {% endif %}
+      </div>
+
+      <!-- Step labels -->
+      <div style="display:flex;gap:3px;margin-top:4px;">
+        {% if step_data %}
+          {% set parsed = step_data | fromjson %}
+          {% for step in all_steps %}
+          {% set s = parsed.get(step, {}).get('status', 'pending') if parsed else 'pending' %}
+          <div style="flex:1;font-size:9px;color:
+            {% if s == 'visited' %}var(--green)
+            {% elif s == 'current' %}var(--red)
+            {% else %}#3d444d{% endif %};
+            text-align:center;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;">
+            {{ step | replace('Order','') | replace('InProgress',' Build') |
+               replace('TheFactory',' Left') | replace('Transit',' Transit') |
+               replace('AtRetailer',' Arrived') }}
+          </div>
+          {% if not loop.last %}
+          <div style="width:4px;flex-shrink:0;"></div>
+          {% endif %}
+          {% endfor %}
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
 
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:1.25rem;">
     <div class="card">
