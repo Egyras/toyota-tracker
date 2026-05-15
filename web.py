@@ -215,9 +215,13 @@ label { color:#888; font-size:.85rem; margin-bottom:.2rem; display:block; }
 """
 
 TRACKER_PAGE = BASE_STYLE + """
-<div class="nav"><a href="/">🚗 Tracker</a><a href="/stats">📊 Statistics</a></div>
+<div class="nav">
+  <a href="/">🚗 Tracker</a>
+  <a href="/stats">📊 Statistics</a>
+  <a href="https://github.com/Egyras/toyota-tracker" target="_blank">⚙ Source code</a>
+</div>
 <h1>Toyota Order Tracker</h1>
-<p class="meta">Check your Toyota order status · credentials never stored</p>
+<p class="meta">Check your Toyota order status · built for the community</p>
 {% if not username %}
 <form method="POST" style="max-width:320px">
   <label>Toyota account email</label>
@@ -226,6 +230,19 @@ TRACKER_PAGE = BASE_STYLE + """
   <input type="password" name="password" required>
   <input type="submit" value="Check my order →">
 </form>
+
+<div style="margin-top:2rem;max-width:520px;border:1px solid #1e1e2e;border-radius:6px;padding:1.1rem 1.2rem;font-size:.82rem;line-height:1.8;color:#555;">
+  <div style="color:#aaa;font-size:.8rem;letter-spacing:.07em;margin-bottom:.7rem;">🔒 HOW YOUR CREDENTIALS ARE HANDLED</div>
+  <p style="margin:0 0 .6rem;">Your email and password are sent directly to Toyota's official API at
+  <code style="color:#888;">ssoms.toyota-europe.com</code> — the same endpoint the Toyota website uses.
+  They are never written to disk, never logged, and never stored in any database.</p>
+  <p style="margin:0 0 .6rem;">Once Toyota returns your order data, the credentials are discarded.
+  Only anonymized order details are saved for statistics: vehicle model, current step,
+  destination country, and delay/damage flags. No name, no email, no order ID is stored.</p>
+  <p style="margin:0;">You can verify this yourself by reading the full source code —
+  <a href="https://github.com/Egyras/toyota-tracker/blob/main/web.py" target="_blank" style="color:#666;">web.py on GitHub</a>.
+  The relevant function is <code style="color:#888;">save_stats()</code>.</p>
+</div>
 {% else %}
 <pre>{{ output }}</pre>
 <p style="margin-top:1rem;"><a href="/">← Check again</a> &nbsp; <a href="/stats">📊 Global stats</a></p>
