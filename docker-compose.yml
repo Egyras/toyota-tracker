@@ -2,13 +2,13 @@
 # Production deployment is handled by Jenkins (see Jenkinsfile)
 # Cloudflared runs as a separate TrueNAS App
 
-version: "3.8"
+version: "3.9"
 services:
   toyota-tracker:
     build: .
     container_name: toyota-tracker
     ports:
-      - "8888:8080"
+      - "8889:8080"
     environment:
       - DB_PATH=/data/stats.db
       - TOYOTA_USERNAME=
