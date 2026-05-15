@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Toyota Order Tracker — Flask web wrapper with anonymized stats collection."""
-import os, sys, re, html, json, sqlite3, subprocess
+import os, sys, re, html, json, sqlite3
 from datetime import datetime
 from flask import Flask, render_template_string, request, g
 
@@ -62,8 +62,9 @@ def days_between(d1, d2):
     except Exception:
         return None
 
-def save_stats(order: dict, step_dates: dict):
-    """Store anonymized snapshot — no credentials, no order IDs, no names stored."""
+def save_stats(order: dict, step_dates: dict, today_only: bool = True):
+    """Store anonymized snapshot — no credentials, no order IDs, no names stored.
+    today_only=True means one row per order per calendar day maximum."""
     try:
         import hashlib
         details    = order.get("orderDetails", {})
@@ -82,8 +83,19 @@ def save_stats(order: dict, step_dates: dict):
         model      = details.get("vehicleModel")
 
         db = get_db()
+
+        # Skip if we already recorded this order today
+        if today_only and order_hash:
+            today = datetime.utcnow().strftime("%Y-%m-%d")
+            exists = db.execute(
+                "SELECT 1 FROM checks WHERE order_hash=? AND ts LIKE ?",
+                (order_hash, f"{today}%")
+            ).fetchone()
+            if exists:
+                return
+
         db.execute("""
-            INSERT OR REPLACE INTO checks
+            INSERT INTO checks
               (ts, order_hash, model, engine, transmission, color, status,
                destination, dest_country, is_delayed, has_damage,
                steps_json, deliveries_json)
@@ -333,8 +345,6 @@ STATS_PAGE = BASE_STYLE + """
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-ANSI = re.compile(r'\x1b\[[0-9;]*m')
-
 @app.route("/", methods=["GET", "POST"])
 def index():
     username = USERNAME
@@ -347,37 +357,60 @@ def index():
 
     if username and password:
         try:
-            # Run with --store-dates to persist step transition dates
-            subprocess.run(
-                [sys.executable, "/app/toyota.py", "--username", username,
-                 "--password", password, "--store-dates"],
-                capture_output=True, text=True, timeout=60, cwd="/data"
-            )
-            result = subprocess.run(
-                [sys.executable, "/app/toyota.py", "--username", username,
-                 "--password", password],
-                capture_output=True, text=True, timeout=60
-            )
-            output = html.escape(ANSI.sub('', result.stdout or "No output."))
+            sys.path.insert(0, '/app')
+            from toyota import ToyotaSession
 
-            # Also fetch raw data for stats collection
-            try:
-                sys.path.insert(0, '/app')
-                from toyota import ToyotaSession
-                session = ToyotaSession(username, password)
-                for oid in session.fetch_orders():
-                    details    = session.fetch_order_details(oid)
-                    dates_file = f"/data/{oid}.json"
-                    step_dates = {}
-                    if os.path.exists(dates_file):
-                        with open(dates_file) as f:
-                            step_dates = json.load(f)
-                    save_stats(details, step_dates)
-            except Exception as e:
-                print(f"[stats] error: {e}", file=sys.stderr)
+            # Single API session — used for display, stats and date tracking
+            session = ToyotaSession(username, password)
+            lines   = []
 
-        except subprocess.TimeoutExpired:
-            output = html.escape("Request timed out after 60s.")
+            for oid in session.fetch_orders():
+                details = session.fetch_order_details(oid)
+
+                # Read step dates written by previous --store-dates runs
+                dates_file = f"/data/{oid}.json"
+                step_dates = {}
+                if os.path.exists(dates_file):
+                    with open(dates_file) as f:
+                        step_dates = json.load(f)
+
+                # Save stats — max one row per order per day
+                save_stats(details, step_dates, today_only=True)
+
+                # Build display output from raw data
+                od     = details.get("orderDetails", {})
+                st     = details.get("currentStatus", {})
+                steps  = details.get("preprocessed", {}).get("steps", {})
+                delivs = details.get("intermediateDeliveries", [])
+
+                lines += [
+                    f"\n  Order {od.get('orderId', '')}",
+                    f"\n  Status:            {st.get('currentStatus', '')}",
+                    f"  Estimated delivery:{details.get('etaToFinalDestination', 'N/A')}",
+                    f"\n  Delayed:  {st.get('isDelayed', False)}",
+                    f"  Damage:   {st.get('damageCode') or 'None'}",
+                    f"\n  Vehicle:      {od.get('vehicleModel', '')}",
+                    f"  Engine:       {od.get('engine', '')}",
+                    f"  Transmission: {od.get('transmission', '')}",
+                    f"  Colour:       {od.get('vehicleExternalColor', '')}",
+                    f"  VIN:          {od.get('vin') or 'not yet assigned'}",
+                    "\n  Steps:",
+                ]
+                for k, v in steps.items():
+                    lines.append(f"    {k:<28} {v.get('status', '')}")
+
+                if delivs:
+                    lines.append("\n  Delivery route:")
+                    for d in delivs:
+                        lines.append(
+                            f"    {d.get('locationName','')}, "
+                            f"{d.get('countryName','')} "
+                            f"[{d.get('destinationType','')}] "
+                            f"— {d.get('isVisited','')}"
+                        )
+
+            output = html.escape("\n".join(lines)) if lines else html.escape("No orders found.")
+
         except Exception as e:
             output = html.escape(f"Error: {e}")
 
