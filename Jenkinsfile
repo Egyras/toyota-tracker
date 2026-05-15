@@ -79,7 +79,7 @@ pipeline {
             sh 'docker image prune -f --filter "dangling=true" || true'
         }
         success {
-            echo "✅ Build #${env.BUILD_NUMBER} deployed — http://192.168.8.132:8889"
+            echo "✅ Build #${env.BUILD_NUMBER} deployed — http://192.168.8.211:8889"
         }
         failure {
             echo "❌ Build #${env.BUILD_NUMBER} failed"
