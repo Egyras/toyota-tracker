@@ -360,56 +360,26 @@ def index():
             sys.path.insert(0, '/app')
             from toyota import ToyotaSession
 
-            # Single API session — used for display, stats and date tracking
+            # Single API session for stats collection
             session = ToyotaSession(username, password)
-            lines   = []
-
             for oid in session.fetch_orders():
-                details = session.fetch_order_details(oid)
-
-                # Read step dates written by previous --store-dates runs
+                details    = session.fetch_order_details(oid)
                 dates_file = f"/data/{oid}.json"
                 step_dates = {}
                 if os.path.exists(dates_file):
                     with open(dates_file) as f:
                         step_dates = json.load(f)
-
-                # Save stats — max one row per order per day
                 save_stats(details, step_dates, today_only=True)
 
-                # Build display output from raw data
-                od     = details.get("orderDetails", {})
-                st     = details.get("currentStatus", {})
-                steps  = details.get("preprocessed", {}).get("steps", {})
-                delivs = details.get("intermediateDeliveries", [])
-
-                lines += [
-                    f"\n  Order {od.get('orderId', '')}",
-                    f"\n  Status:            {st.get('currentStatus', '')}",
-                    f"  Estimated delivery:{details.get('etaToFinalDestination', 'N/A')}",
-                    f"\n  Delayed:  {st.get('isDelayed', False)}",
-                    f"  Damage:   {st.get('damageCode') or 'None'}",
-                    f"\n  Vehicle:      {od.get('vehicleModel', '')}",
-                    f"  Engine:       {od.get('engine', '')}",
-                    f"  Transmission: {od.get('transmission', '')}",
-                    f"  Colour:       {od.get('vehicleExternalColor', '')}",
-                    f"  VIN:          {od.get('vin') or 'not yet assigned'}",
-                    "\n  Steps:",
-                ]
-                for k, v in steps.items():
-                    lines.append(f"    {k:<28} {v.get('status', '')}")
-
-                if delivs:
-                    lines.append("\n  Delivery route:")
-                    for d in delivs:
-                        lines.append(
-                            f"    {d.get('locationName','')}, "
-                            f"{d.get('countryName','')} "
-                            f"[{d.get('destinationType','')}] "
-                            f"— {d.get('isVisited','')}"
-                        )
-
-            output = html.escape("\n".join(lines)) if lines else html.escape("No orders found.")
+            # Use toyota.py for the nice formatted table output
+            import subprocess, re
+            result = subprocess.run(
+                [sys.executable, "/app/toyota.py", "--username", username,
+                 "--password", password, "--store-dates"],
+                capture_output=True, text=True, timeout=60, cwd="/data"
+            )
+            ansi = re.compile(r'\x1b\[[0-9;]*m')
+            output = html.escape(ansi.sub('', result.stdout or "No output."))
 
         except Exception as e:
             output = html.escape(f"Error: {e}")
