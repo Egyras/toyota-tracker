@@ -26,6 +26,7 @@ def get_db():
                 engine        TEXT,
                 transmission  TEXT,
                 color         TEXT,
+                vin           TEXT,
                 status        TEXT,
                 destination   TEXT,
                 dest_country  TEXT,
@@ -330,10 +331,16 @@ TRACKER_PAGE = BASE + """
 
   <div style="display:flex;align-items:center;justify-content:space-between;
               margin-bottom:1.25rem;flex-wrap:wrap;gap:.5rem;">
-    <div>
-      <div style="font-size:20px;font-weight:600;">{{ od.vehicleModel }}</div>
-      <div style="font-size:12px;color:var(--muted);margin-top:2px;">
-        Order {{ od.orderId }}</div>
+    <div style="display:flex;align-items:center;gap:1.5rem;">
+      {% if od.imageUrl %}
+      <img src="{{ od.imageUrl }}" alt="{{ od.vehicleModel }}"
+           style="height:80px;width:auto;object-fit:contain;border-radius:8px;">
+      {% endif %}
+      <div>
+        <div style="font-size:20px;font-weight:600;">{{ od.vehicleModel }}</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:2px;">
+          Order {{ od.orderId }}</div>
+      </div>
     </div>
     <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;">
       {% if st.isDelayed %}<span class="badge badge-delayed">⚠ Delayed</span>{% endif %}
