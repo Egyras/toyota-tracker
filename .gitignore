@@ -1,0 +1,21 @@
+# Environment files — never commit these
+.env
+*.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# SQLite database (lives on TrueNAS volume)
+*.db
+
+# macOS / editor
+.DS_Store
+.idea/
+.vscode/settings.json
+*.swp
+*.swo
+
+# Docker build cache
+.dockerignore
