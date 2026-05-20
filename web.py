@@ -169,15 +169,27 @@ def _save_step_durations(db, order_hash, model, dest_country, steps, step_dates)
 
 def get_stats_data():
     db    = get_db()
-    total = (db.execute("SELECT COUNT(DISTINCT order_hash) FROM checks WHERE order_hash IS NOT NULL").fetchone()[0]
-             or db.execute("SELECT COUNT(*) FROM checks").fetchone()[0])
-    by_model     = db.execute("SELECT model, COUNT(*) c FROM checks WHERE model IS NOT NULL GROUP BY model ORDER BY c DESC").fetchall()
-    by_status    = db.execute("SELECT status, COUNT(*) c FROM checks WHERE status IS NOT NULL GROUP BY status ORDER BY c DESC").fetchall()
-    delayed      = db.execute("SELECT COUNT(*) FROM checks WHERE is_delayed=1").fetchone()[0]
-    damaged      = db.execute("SELECT COUNT(*) FROM checks WHERE has_damage=1").fetchone()[0]
-    recent       = db.execute("SELECT ts, model, status, dest_country FROM checks ORDER BY id DESC LIMIT 20").fetchall()
+    total = db.execute("SELECT COUNT(DISTINCT order_hash) FROM checks WHERE order_hash IS NOT NULL").fetchone()[0]
+    by_model     = db.execute("SELECT model, COUNT(DISTINCT order_hash) c FROM checks WHERE model IS NOT NULL GROUP BY model ORDER BY c DESC").fetchall()
+    by_status    = db.execute("""
+        SELECT status, COUNT(DISTINCT order_hash) c FROM checks c1
+        WHERE status IS NOT NULL
+          AND ts = (SELECT MAX(ts) FROM checks c2 WHERE c2.order_hash = c1.order_hash)
+        GROUP BY status ORDER BY c DESC
+    """).fetchall()
+    delayed      = db.execute("SELECT COUNT(DISTINCT order_hash) FROM checks WHERE is_delayed=1").fetchone()[0]
+    damaged      = db.execute("SELECT COUNT(DISTINCT order_hash) FROM checks WHERE has_damage=1").fetchone()[0]
+    recent       = db.execute("""
+        SELECT c.ts, c.model, c.status, c.dest_country
+        FROM checks c
+        INNER JOIN (
+            SELECT order_hash, MAX(ts) ts FROM checks GROUP BY order_hash
+        ) latest ON c.order_hash = latest.order_hash AND c.ts = latest.ts
+        ORDER BY c.ts DESC LIMIT 20
+    """).fetchall()
     by_country   = db.execute("""
-        SELECT dest_country, COUNT(*) total, SUM(is_delayed) delayed,
+        SELECT dest_country, COUNT(DISTINCT order_hash) total,
+               SUM(DISTINCT CASE WHEN is_delayed=1 THEN 1 ELSE 0 END) delayed,
                GROUP_CONCAT(DISTINCT model) models
         FROM checks WHERE dest_country != '' AND dest_country IS NOT NULL
         GROUP BY dest_country ORDER BY total DESC LIMIT 20
@@ -195,7 +207,7 @@ def get_stats_data():
         ORDER BY days_so_far DESC LIMIT 30
     """).fetchall()
     countries = db.execute(
-        "SELECT COUNT(DISTINCT dest_country) FROM checks WHERE dest_country != '' AND dest_country IS NOT NULL"
+        "SELECT COUNT(DISTINCT dest_country) FROM checks WHERE dest_country != '' AND dest_country IS NOT NULL AND order_hash IS NOT NULL"
     ).fetchone()[0]
     order_dates = db.execute("""
         SELECT created_on, model, dest_country
