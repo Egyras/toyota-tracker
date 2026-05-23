@@ -222,8 +222,10 @@ def get_stats_data():
         GROUP BY step ORDER BY step
     """).fetchall()
     step_current = db.execute("""
-        SELECT sd.step, sd.date_entered,
-               CAST(julianday('now') - julianday(sd.date_entered) AS INTEGER) days_so_far
+        SELECT sd.step,
+               MIN(sd.date_entered) earliest,
+               COUNT(DISTINCT sd.order_hash) order_count,
+               CAST(julianday('now') - julianday(MIN(sd.date_entered)) AS INTEGER) days_so_far
         FROM step_durations sd
         INNER JOIN (
             SELECT order_hash, MAX(ts) ts FROM checks GROUP BY order_hash
@@ -231,14 +233,8 @@ def get_stats_data():
         INNER JOIN checks c ON c.order_hash = sd.order_hash AND c.ts = latest.ts
         WHERE sd.date_left IS NULL
           AND sd.date_entered IS NOT NULL
-          AND c.status = CASE
-              WHEN sd.step = 'processedOrder'    THEN 'ProcessingOrder'
-              WHEN sd.step = 'buildInProgress'   THEN 'BuildInProgress'
-              WHEN sd.step = 'leftTheFactory'    THEN 'LeftTheFactory'
-              WHEN sd.step = 'inTransit'         THEN 'InTransit'
-              WHEN sd.step = 'arrivedAtRetailer' THEN 'ArrivedAtRetailer'
-              ELSE c.status END
-        ORDER BY days_so_far DESC LIMIT 30
+        GROUP BY sd.step
+        ORDER BY days_so_far DESC LIMIT 10
     """).fetchall()
     # Order date → buildInProgress: uses createdOn (from API, reliable)
     # Only count when buildInProgress date_entered was observed as current first
@@ -728,12 +724,13 @@ STATS_PAGE = BASE + """
         <div style="font-size:11px;color:var(--muted);margin-bottom:.75rem;
                     text-transform:uppercase;letter-spacing:.05em;">Currently in progress</div>
         <table class="data-table">
-          <tr><th>Step</th><th>Days so far</th><th>Since</th></tr>
+          <tr><th>Step</th><th>Orders</th><th>Days so far</th><th>Earliest seen</th></tr>
           {% for r in step_current %}
           <tr>
             <td>{{ r['step'] }}</td>
+            <td style="color:var(--muted);">{{ r['order_count'] }}</td>
             <td><span class="badge badge-current">{{ r['days_so_far'] }}d</span></td>
-            <td style="color:var(--muted);">{{ r['date_entered'] }}</td>
+            <td style="color:var(--muted);">{{ r['earliest'] }}</td>
           </tr>
           {% endfor %}
         </table>
@@ -741,6 +738,24 @@ STATS_PAGE = BASE + """
       {% endif %}
     {% else %}
       <p style="color:var(--muted);font-size:13px;">No duration data yet.</p>
+    {% endif %}
+
+    {% if step_current and not step_avgs %}
+    <div style="margin-top:.5rem;padding-top:1rem;border-top:1px solid var(--border);">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:.75rem;
+                  text-transform:uppercase;letter-spacing:.05em;">Currently in progress</div>
+      <table class="data-table">
+        <tr><th>Step</th><th>Orders</th><th>Days so far</th><th>Earliest seen</th></tr>
+        {% for r in step_current %}
+        <tr>
+          <td>{{ r['step'] }}</td>
+          <td style="color:var(--muted);">{{ r['order_count'] }}</td>
+          <td><span class="badge badge-current">{{ r['days_so_far'] }}d</span></td>
+          <td style="color:var(--muted);">{{ r['earliest'] }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
     {% endif %}
   </div>
 
