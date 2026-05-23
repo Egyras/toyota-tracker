@@ -44,6 +44,7 @@ def get_db():
                 date_entered  TEXT,
                 date_left     TEXT,
                 duration_days INTEGER,
+                observed      INTEGER DEFAULT 0,
                 UNIQUE(order_hash, step)
             );
             -- migrate: add created_on if upgrading from older schema
@@ -53,6 +54,9 @@ def get_db():
         cols = [r[1] for r in db.execute("PRAGMA table_info(checks)").fetchall()]
         if 'created_on' not in cols:
             db.execute("ALTER TABLE checks ADD COLUMN created_on TEXT")
+        sd_cols = [r[1] for r in db.execute("PRAGMA table_info(step_durations)").fetchall()]
+        if 'observed' not in sd_cols:
+            db.execute("ALTER TABLE step_durations ADD COLUMN observed INTEGER DEFAULT 0")
         db.commit()
         g.db = db
     return g.db
@@ -135,35 +139,49 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True, created_o
         print(f"[stats] save error: {e}", file=sys.stderr)
 
 def _save_step_durations(db, order_hash, model, dest_country, steps, step_dates):
-    """Save step durations from dates file AND from preprocessed step data."""
+    """Save step durations. Only mark as observed=1 when we witnessed the transition.
+
+    observed=1 means: we saw this step as 'current' on a previous login,
+                      and now see it as 'visited' — so both dates are real observations.
+    observed=0 means: step was already completed when user first logged in —
+                      dates are unreliable, don't use for duration stats.
+    """
     if not order_hash:
         return
 
-    # From --store-dates JSON file (has exact calendar dates)
     if step_dates:
         for step, dates in step_dates.get("steps", {}).items():
-            entered = dates.get("current") or dates.get("visited")
-            left    = dates.get("visited") if "current" in dates else None
-            dur     = days_between(entered, left) if (entered and left) else None
+            entered = dates.get("current")   # date we first saw it as current
+            left    = dates.get("visited")   # date we first saw it as visited
+
+            # Only mark observed=1 if we have BOTH dates
+            # (meaning we logged in when current, then again when visited)
+            observed = 1 if (entered and left) else 0
+            dur      = days_between(entered, left) if observed else None
+
+            # Use whichever date we have for date_entered
+            date_entered = entered or left
+
             db.execute("""
                 INSERT INTO step_durations
                   (order_hash, step, model, dest_country,
-                   date_entered, date_left, duration_days)
-                VALUES (?,?,?,?,?,?,?)
+                   date_entered, date_left, duration_days, observed)
+                VALUES (?,?,?,?,?,?,?,?)
                 ON CONFLICT(order_hash, step) DO UPDATE SET
-                  date_left=excluded.date_left,
-                  duration_days=excluded.duration_days
-            """, (order_hash, step, model, dest_country, entered, left, dur))
+                  date_left      = COALESCE(excluded.date_left, date_left),
+                  duration_days  = excluded.duration_days,
+                  observed       = MAX(observed, excluded.observed)
+            """, (order_hash, step, model, dest_country,
+                  date_entered, left, dur, observed))
 
-    # From preprocessed steps — at minimum record which steps are visited/current
-    # even if we don't have exact dates yet
+    # Record steps visible from preprocessed (for currently-in-progress tracking)
     for step_name, step_data in steps.items():
         s = step_data.get("status", "")
         if s in ("visited", "current"):
             db.execute("""
                 INSERT INTO step_durations
-                  (order_hash, step, model, dest_country)
-                VALUES (?,?,?,?)
+                  (order_hash, step, model, dest_country, observed)
+                VALUES (?,?,?,?,0)
                 ON CONFLICT(order_hash, step) DO NOTHING
             """, (order_hash, step_name, model, dest_country))
 
@@ -197,15 +215,49 @@ def get_stats_data():
     step_avgs    = db.execute("""
         SELECT step, COUNT(*) samples, ROUND(AVG(duration_days),1) avg_days,
                MIN(duration_days) min_days, MAX(duration_days) max_days
-        FROM step_durations WHERE duration_days IS NOT NULL AND duration_days >= 0
+        FROM step_durations
+        WHERE duration_days IS NOT NULL
+          AND duration_days >= 0
+          AND observed = 1
         GROUP BY step ORDER BY step
     """).fetchall()
     step_current = db.execute("""
-        SELECT step, date_entered,
-               CAST(julianday('now') - julianday(date_entered) AS INTEGER) days_so_far
-        FROM step_durations WHERE date_left IS NULL AND date_entered IS NOT NULL
+        SELECT sd.step, sd.date_entered,
+               CAST(julianday('now') - julianday(sd.date_entered) AS INTEGER) days_so_far
+        FROM step_durations sd
+        INNER JOIN (
+            SELECT order_hash, MAX(ts) ts FROM checks GROUP BY order_hash
+        ) latest ON sd.order_hash = latest.order_hash
+        INNER JOIN checks c ON c.order_hash = sd.order_hash AND c.ts = latest.ts
+        WHERE sd.date_left IS NULL
+          AND sd.date_entered IS NOT NULL
+          AND c.status = CASE
+              WHEN sd.step = 'processedOrder'    THEN 'ProcessingOrder'
+              WHEN sd.step = 'buildInProgress'   THEN 'BuildInProgress'
+              WHEN sd.step = 'leftTheFactory'    THEN 'LeftTheFactory'
+              WHEN sd.step = 'inTransit'         THEN 'InTransit'
+              WHEN sd.step = 'arrivedAtRetailer' THEN 'ArrivedAtRetailer'
+              ELSE c.status END
         ORDER BY days_so_far DESC LIMIT 30
     """).fetchall()
+    # Order date → buildInProgress: uses createdOn (from API, reliable)
+    # Only count when buildInProgress date_entered was observed as current first
+    order_to_build = db.execute("""
+        SELECT COUNT(*) samples,
+               ROUND(AVG(julianday(sd.date_entered) - julianday(c.created_on)), 1) avg_days,
+               MIN(CAST(julianday(sd.date_entered) - julianday(c.created_on) AS INTEGER)) min_days,
+               MAX(CAST(julianday(sd.date_entered) - julianday(c.created_on) AS INTEGER)) max_days
+        FROM step_durations sd
+        JOIN (
+            SELECT order_hash, MIN(created_on) created_on
+            FROM checks WHERE created_on IS NOT NULL
+            GROUP BY order_hash
+        ) c ON sd.order_hash = c.order_hash
+        WHERE sd.step = 'buildInProgress'
+          AND sd.date_entered IS NOT NULL
+          AND c.created_on IS NOT NULL
+          AND julianday(sd.date_entered) > julianday(c.created_on)
+    """).fetchone()
     countries = db.execute(
         "SELECT COUNT(DISTINCT dest_country) FROM checks WHERE dest_country != '' AND dest_country IS NOT NULL AND order_hash IS NOT NULL"
     ).fetchone()[0]
@@ -254,7 +306,7 @@ def get_stats_data():
                 by_country=by_country, delayed=delayed, damaged=damaged,
                 recent=recent, step_avgs=step_avgs, step_current=step_current,
                 countries=countries, order_dates=order_dates,
-                order_journeys=order_journeys)
+                order_journeys=order_journeys, order_to_build=order_to_build)
 
 # ── Templates ─────────────────────────────────────────────────────────────────
 
@@ -633,6 +685,27 @@ STATS_PAGE = BASE + """
 
   <div class="card">
     <div class="section-head">⏱ How long does each step take?</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:1rem;">
+      Only counts orders where we observed both the start and end of a step.
+    </div>
+
+    {% if order_to_build and order_to_build['samples'] > 0 %}
+    <div style="background:var(--surface2);border:1px solid var(--border);
+                border-radius:8px;padding:.85rem;margin-bottom:1rem;">
+      <div style="font-size:11px;color:var(--muted);text-transform:uppercase;
+                  letter-spacing:.05em;margin-bottom:.4rem;">
+        📦 Order placed → Production started (using API order date — most accurate)
+      </div>
+      <div style="font-size:20px;font-weight:600;color:var(--text);">
+        ~{{ order_to_build['avg_days'] }} days
+        <span style="font-size:12px;color:var(--muted);font-weight:400;">
+          &nbsp;min {{ order_to_build['min_days'] }} / max {{ order_to_build['max_days'] }}
+          · {{ order_to_build['samples'] }} orders
+        </span>
+      </div>
+    </div>
+    {% endif %}
+
     {% if step_avgs %}
       {% set max_avg = namespace(v=1) %}
       {% for r in step_avgs %}{% if r['avg_days'] > max_avg.v %}{% set max_avg.v = r['avg_days'] %}{% endif %}{% endfor %}
