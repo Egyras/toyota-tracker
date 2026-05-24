@@ -197,7 +197,7 @@ def get_stats_data():
     """).fetchall()
     delayed      = db.execute("SELECT COUNT(DISTINCT order_hash) FROM checks WHERE is_delayed=1").fetchone()[0]
     damaged      = db.execute("SELECT COUNT(DISTINCT order_hash) FROM checks WHERE has_damage=1").fetchone()[0]
-    recent       = db.execute("""
+    recent = db.execute("""
         SELECT c.ts, c.model, c.status, c.dest_country
         FROM checks c
         INNER JOIN (
@@ -882,10 +882,10 @@ STATS_PAGE = BASE + """
   <div class="card">
     <div class="section-head">🕐 Recent checks</div>
     <table class="data-table">
-      <tr><th>Time (UTC+3)</th><th>Model</th><th>Status</th><th>Country</th></tr>
+      <tr><th>Time (local)</th><th>Model</th><th>Status</th><th>Country</th></tr>
       {% for r in recent %}
       <tr>
-        <td style="color:var(--muted);">{{ r['ts'][:16] | replace('T', ' ') }}</td>
+        <td class="utc-time" data-utc="{{ r['ts'][:16] }}" style="color:var(--muted);">{{ r['ts'][:16] | replace('T',' ') }}</td>
         <td>{{ r['model'] or '—' }}</td>
         <td><span class="badge badge-pending">{{ r['status'] or '—' }}</span></td>
         <td>{{ r['dest_country'] or '—' }}</td>
@@ -893,7 +893,23 @@ STATS_PAGE = BASE + """
       {% endfor %}
     </table>
   </div>
-</div></body></html>
+</div>
+<script>
+// Convert UTC timestamps to browser's local timezone
+document.querySelectorAll('.utc-time').forEach(function(el) {
+  var utc = el.getAttribute('data-utc');
+  if (!utc) return;
+  try {
+    var d = new Date(utc + 'Z'); // append Z to tell JS it's UTC
+    el.textContent = d.toLocaleString(undefined, {
+      year:'numeric', month:'2-digit', day:'2-digit',
+      hour:'2-digit', minute:'2-digit', hour12:false
+    });
+    el.title = 'UTC: ' + utc;
+  } catch(e) {}
+});
+</script>
+</body></html>
 """
 
 # ── Routes ────────────────────────────────────────────────────────────────────
