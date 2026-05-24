@@ -236,23 +236,31 @@ def get_stats_data():
         GROUP BY sd.step
         ORDER BY days_so_far DESC LIMIT 10
     """).fetchall()
-    # Order date → buildInProgress: uses createdOn (from API, reliable)
-    # Only count when buildInProgress date_entered was observed as current first
+    # Order date → buildInProgress: only reliable if:
+    # 1. processedOrder was observed as current (date_entered set while at that step)
+    # 2. buildInProgress date_entered came AFTER processedOrder date_entered
+    # 3. We use the API createdOn as order date (most accurate date we have)
     order_to_build = db.execute("""
         SELECT COUNT(*) samples,
-               ROUND(AVG(julianday(sd.date_entered) - julianday(c.created_on)), 1) avg_days,
-               MIN(CAST(julianday(sd.date_entered) - julianday(c.created_on) AS INTEGER)) min_days,
-               MAX(CAST(julianday(sd.date_entered) - julianday(c.created_on) AS INTEGER)) max_days
-        FROM step_durations sd
+               ROUND(AVG(julianday(sd_build.date_entered) - julianday(c.created_on)), 1) avg_days,
+               MIN(CAST(julianday(sd_build.date_entered) - julianday(c.created_on) AS INTEGER)) min_days,
+               MAX(CAST(julianday(sd_build.date_entered) - julianday(c.created_on) AS INTEGER)) max_days
+        FROM step_durations sd_build
+        JOIN step_durations sd_proc
+          ON sd_build.order_hash = sd_proc.order_hash
+         AND sd_proc.step = 'processedOrder'
+         AND sd_proc.date_entered IS NOT NULL
+         AND sd_proc.observed = 1
         JOIN (
             SELECT order_hash, MIN(created_on) created_on
             FROM checks WHERE created_on IS NOT NULL
             GROUP BY order_hash
-        ) c ON sd.order_hash = c.order_hash
-        WHERE sd.step = 'buildInProgress'
-          AND sd.date_entered IS NOT NULL
+        ) c ON sd_build.order_hash = c.order_hash
+        WHERE sd_build.step = 'buildInProgress'
+          AND sd_build.date_entered IS NOT NULL
           AND c.created_on IS NOT NULL
-          AND julianday(sd.date_entered) > julianday(c.created_on)
+          AND julianday(sd_build.date_entered) > julianday(sd_proc.date_entered)
+          AND julianday(sd_build.date_entered) > julianday(c.created_on)
     """).fetchone()
     countries = db.execute(
         "SELECT COUNT(DISTINCT dest_country) FROM checks WHERE dest_country != '' AND dest_country IS NOT NULL AND order_hash IS NOT NULL"
@@ -874,10 +882,10 @@ STATS_PAGE = BASE + """
   <div class="card">
     <div class="section-head">🕐 Recent checks</div>
     <table class="data-table">
-      <tr><th>Time (UTC)</th><th>Model</th><th>Status</th><th>Country</th></tr>
+      <tr><th>Time (UTC+3)</th><th>Model</th><th>Status</th><th>Country</th></tr>
       {% for r in recent %}
       <tr>
-        <td style="color:var(--muted);">{{ r['ts'][:16] }}</td>
+        <td style="color:var(--muted);">{{ r['ts'][:16] | replace('T', ' ') }}</td>
         <td>{{ r['model'] or '—' }}</td>
         <td><span class="badge badge-pending">{{ r['status'] or '—' }}</span></td>
         <td>{{ r['dest_country'] or '—' }}</td>
