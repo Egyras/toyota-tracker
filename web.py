@@ -330,13 +330,24 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);
      min-height:100vh;font-size:14px;line-height:1.6;}
 a{color:var(--red);text-decoration:none;}
 a:hover{text-decoration:underline;}
-.nav{border-bottom:1px solid var(--border);padding:0 2rem;
-     display:flex;align-items:center;gap:2rem;height:56px;}
-.nav-brand{font-weight:600;font-size:15px;color:var(--text);
-           display:flex;align-items:center;gap:8px;}
-.nav-links{display:flex;gap:1.5rem;margin-left:auto;}
-.nav-links a{color:var(--muted);font-size:13px;}
-.nav-links a:hover{color:var(--text);text-decoration:none;}
+.nav{background:rgba(13,17,23,0.85);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+     border-bottom:0.5px solid rgba(255,255,255,0.08);padding:0 2rem;
+     display:flex;align-items:center;height:56px;
+     position:sticky;top:0;z-index:100;}
+.nav-brand{display:flex;align-items:center;gap:10px;text-decoration:none!important;}
+.nav-brand-icon{width:28px;height:28px;border-radius:6px;background:var(--red);
+                display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.nav-brand-name{font-size:14px;font-weight:500;color:var(--text);letter-spacing:-.01em;}
+.nav-links{display:flex;gap:4px;margin-left:auto;align-items:center;}
+.nav-link{display:flex;align-items:center;gap:6px;padding:6px 12px;
+          border-radius:6px;font-size:13px;color:var(--muted);text-decoration:none!important;
+          border:0.5px solid transparent;transition:all .15s;}
+.nav-link:hover{color:var(--text);background:rgba(255,255,255,0.06);text-decoration:none!important;}
+.nav-link.active{color:var(--text);background:rgba(229,0,26,.12);border-color:rgba(229,0,26,.25);}
+.nav-link svg{width:15px;height:15px;flex-shrink:0;}
+.nav-divider{width:0.5px;height:18px;background:rgba(255,255,255,0.1);margin:0 4px;}
+.nav-pill{font-size:10px;font-weight:600;background:var(--red);color:#fff;
+          padding:1px 6px;border-radius:20px;margin-left:2px;}
 .container{max-width:860px;margin:0 auto;padding:2rem;}
 .card{background:var(--surface);border:1px solid var(--border);
       border-radius:var(--radius);padding:1.5rem;margin-bottom:1.25rem;}
@@ -432,18 +443,48 @@ a:hover{text-decoration:underline;}
 </head>
 <body>
 <nav class="nav">
-  <div class="nav-brand">
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#e5001a" stroke-width="2.5">
-      <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-    </svg>
-    Toyota Europe Tracker
-  </div>
+  <a class="nav-brand" href="/">
+    <div class="nav-brand-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" aria-hidden="true">
+        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+      </svg>
+    </div>
+    <span class="nav-brand-name">Toyota Europe Tracker</span>
+  </a>
   <div class="nav-links">
-    <a href="/">Tracker</a>
-    <a href="/stats">Statistics</a>
-    <a href="https://github.com/Egyras/toyota-tracker" target="_blank">Source ↗</a>
+    <a href="/" class="nav-link {% if request.path == '/' %}active{% endif %}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+      </svg>
+      Tracker
+    </a>
+    <a href="/stats" class="nav-link {% if request.path == '/stats' %}active{% endif %}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/>
+        <line x1="6" y1="20" x2="6" y2="14"/>
+      </svg>
+      Statistics
+      <span class="nav-pill" id="nav-order-count"></span>
+    </a>
+    <div class="nav-divider"></div>
+    <a href="https://github.com/Egyras/toyota-tracker" target="_blank" class="nav-link">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/>
+      </svg>
+      Source
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:11px;height:11px;opacity:.5;" aria-hidden="true">
+        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+        <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+      </svg>
+    </a>
   </div>
 </nav>
+<script>
+fetch('/stats/count').then(r=>r.json()).then(d=>{
+  var el=document.getElementById('nav-order-count');
+  if(el&&d.total>0)el.textContent=d.total;
+}).catch(()=>{});
+</script>
 """
 
 TRACKER_PAGE = BASE + """
@@ -964,13 +1005,21 @@ def index():
             error = str(e)
 
     return render_template_string(TRACKER_PAGE,
-                                  orders=orders, username=username, error=error)
+                                  orders=orders, username=username,
+                                  error=error, request=request)
+
+@app.route("/stats/count")
+def stats_count():
+    from flask import jsonify
+    db = get_db()
+    total = db.execute("SELECT COUNT(DISTINCT order_hash) FROM checks WHERE order_hash IS NOT NULL").fetchone()[0]
+    return jsonify(total=total)
 
 @app.route("/stats")
 def stats():
     d   = get_stats_data()
     pct = int(d["delayed"] / d["total"] * 100) if d["total"] else 0
-    return render_template_string(STATS_PAGE, pct_delayed=pct, **d)
+    return render_template_string(STATS_PAGE, pct_delayed=pct, request=request, **d)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
