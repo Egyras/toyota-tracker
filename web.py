@@ -648,7 +648,7 @@ TRACKER_PAGE = BASE + """
       <div class="benefit">
         <div class="benefit-icon">🔗</div>
         <div class="benefit-title">Shareable link</div>
-        <div class="benefit-desc">Send the URL to family — no app or account needed</div>
+        <div class="benefit-desc">Share with family — includes live vessel tracking on the map</div>
       </div>
     </div>
 
