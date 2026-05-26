@@ -19,8 +19,10 @@ RUN git clone https://github.com/rmudingay/toyota.git /tmp/toyota \
 # Install Python dependencies (no playwright here - using Node version)
 RUN pip install --no-cache-dir requests flask
 
-# Install Node Playwright + Chromium for detect_vessel.js
-RUN npm install -g playwright --force \
+# Install Node Playwright locally in /app so require('playwright') works
+WORKDIR /app
+RUN npm init -y \
+    && npm install playwright \
     && npx playwright install chromium \
     && npx playwright install-deps chromium
 
