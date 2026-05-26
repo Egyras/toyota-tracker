@@ -140,12 +140,6 @@ def detect_vessel(left_factory_date: str) -> dict | None:
             vessel.update(pos)
     return vessel
 
-        if score > best_score:
-            best_score = score
-            best = r
-
-    return best if best_score >= 3 else None
-
 # ── Database ──────────────────────────────────────────────────────────────────
 
 def get_db():
