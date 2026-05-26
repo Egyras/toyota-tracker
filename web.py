@@ -646,9 +646,9 @@ TRACKER_PAGE = BASE + """
         <div class="benefit-desc">Compare wait times with other buyers across Europe</div>
       </div>
       <div class="benefit">
-        <div class="benefit-icon">🔗</div>
-        <div class="benefit-title">Shareable link</div>
-        <div class="benefit-desc">Share with family — includes live vessel tracking on the map</div>
+        <div class="benefit-icon">🚢</div>
+        <div class="benefit-title">Vessel tracking</div>
+        <div class="benefit-desc">Auto-detects your ship and shows it live on the map while at sea</div>
       </div>
     </div>
 
