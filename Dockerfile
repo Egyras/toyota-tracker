@@ -22,7 +22,7 @@ RUN pip install --no-cache-dir requests flask
 # Install Node Playwright locally in /app so require('playwright') works
 WORKDIR /app
 RUN npm init -y \
-    && npm install playwright \
+    && npm install playwright playwright-extra playwright-extra-plugin-stealth \
     && npx playwright install chromium \
     && npx playwright install-deps chromium
 
