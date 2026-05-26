@@ -2,7 +2,21 @@ const{chromium}=require("playwright");
 const E=process.env.MST_EMAIL||"";
 const P=process.env.MST_PASSWORD||"";
 const D=process.argv[2];
-const MMSI=process.argv[3]||""; // optional: pass MMSI directly to get position only
+const MMSI=process.argv[3]||"";
+
+var TOYOTA_CARRIERS={
+  "431262000":"Hamburg Highway",
+  "311995000":"Elbe Highway",
+  "353100000":"Galveston Highway",
+  "248910000":"Toreador",
+  "432817000":"Altair Leader",
+  "431816000":"Equuleus Leader",
+  "432985000":"Garnet Leader",
+  "431912000":"Sagittarius Leader",
+  "354910000":"Adriatic Highway",
+  "636022929":"Morning Claire",
+  "477307600":"Morning Highway"
+}; // optional: pass MMSI directly to get position only
 
 (async()=>{
 const br=await chromium.launch({headless:true});
@@ -39,8 +53,8 @@ if(MMSI){
 } else {
   // Detect vessel from Nagoya departures
   const lf=new Date(D+"T00:00:00Z");
-  const start=Math.floor((lf.getTime()-3*86400000)/1000);
-  const end=Math.floor(lf.getTime()/1000);
+  const start=Math.floor((lf.getTime()-2*86400000)/1000);
+  const end=Math.floor((lf.getTime()-1*86400000)/1000);
   const u="https://www.myshiptracking.com/ports-arrivals-departures/?mmsi=&pid=4715&type=2&time="+start+"_"+end+"&pp=100";
   process.stderr.write("Departures URL: "+u+"\n");
   await pg.goto(u,{timeout:30000});
@@ -65,33 +79,41 @@ if(MMSI){
   if(matches.length>0) result.mmsi=matches[0].mmsi;
 }
 
-// Get live position from vessel page if we have an MMSI
+// Get live position from direct API endpoint (much faster than loading full page)
 if(result.mmsi){
-  var posUrl="https://www.myshiptracking.com/?mmsi="+result.mmsi;
-  process.stderr.write("Position URL: "+posUrl+"\n");
-  await pg.goto(posUrl,{timeout:30000});
-  await pg.waitForTimeout(4000);
-  var pageText=await pg.textContent("body");
+  var apiUrl="https://www.myshiptracking.com/requests/vesselonmap.php?type=json&mmsi="+result.mmsi+"&_="+Date.now();
+  process.stderr.write("Position API: "+apiUrl+"\n");
+  var apiResp=await pg.evaluate(async function(url){
+    var r=await fetch(url);
+    return await r.text();
+  },apiUrl);
+  process.stderr.write("API response: "+apiResp.slice(0,100)+"\n");
 
-  // Extract coordinates from text like "34.91869° / 136.72725°"
-  var coordMatch=pageText.match(/([\-\d\.]+)°\s*\/\s*([\-\d\.]+)°/);
-  // Extract speed like "7.1 Knots"
-  var speedMatch=pageText.match(/([\d\.]+)\s*[Kk]not/);
-  // Extract "as reported on 2026-05-21 00:06"
-  var timeMatch=pageText.match(/reported on ([\d\-]+ [\d:]+)/);
-  // Extract destination
-  var destMatch=pageText.match(/[Dd]estination[:\s]+([A-Z][A-Z\s,]+?)[\.\n]/);
-  // Extract vessel name from h1/title
-  var nameMatch=pageText.match(/current position of ([A-Z][A-Z\s]+) is/);
+  // Response is tab-separated: lat\tlon\tspeed\ttimestamp
+  var parts=apiResp.trim().split(/\s+/);
+  var lat=parts[0]?parseFloat(parts[0]):null;
+  var lon=parts[1]?parseFloat(parts[1]):null;
+  var speed=parts[2]?parseFloat(parts[2]):null;
+
+  // Also get destination from vesselsonmaptemp which has more detail
+  var destResp=await pg.evaluate(async function(mmsi){
+    var url="https://www.myshiptracking.com/requests/vesselsonmaptempTTT.php?type=json&minlat=-90&maxlat=90&minlon=-180&maxlon=180&zoom=2&selid="+mmsi+"&seltype=0&timecode=-1&filters=%7B%7D";
+    var r=await fetch(url);
+    return await r.text();
+  },result.mmsi);
+
+  // Parse destination from line like: 7\t0\t431262000\tHAMBURG HIGHWAY\t34.91869\t136.72725\t7.1\t1.5\t25\t175\t27\t11\t\t1779311208\tJP YKK
+  var destMatch=destResp.match(result.mmsi+"\t([^\t]+)\t[\d\.]+\t[\d\.]+\t[\d\.]+\t[\d\.]+\t[\d]+\t[\d]+\t[\d]+\t[\d]+\t\t[\d]+\t([A-Z>][^\n\t]*)");
+  var name=destMatch?destMatch[1].trim():null;
+  var dest=destMatch?destMatch[2].trim().replace(/^>/,""):null;
 
   result.position={
-    lat:     coordMatch ? parseFloat(coordMatch[1]) : null,
-    lon:     coordMatch ? parseFloat(coordMatch[2]) : null,
-    speed:   speedMatch ? parseFloat(speedMatch[1]) : null,
-    updated: timeMatch  ? timeMatch[1] : null,
-    dest:    destMatch  ? destMatch[1].trim() : null,
-    name:    nameMatch  ? nameMatch[1].trim() : null,
-    source:  "myshiptracking"
+    lat:    lat,
+    lon:    lon,
+    speed:  speed,
+    dest:   dest,
+    name:   name||TOYOTA_CARRIERS[result.mmsi]||"",
+    source: "myshiptracking"
   };
   process.stderr.write("Position: "+JSON.stringify(result.position)+"\n");
 }
