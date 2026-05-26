@@ -79,6 +79,76 @@ if(MMSI){
   if(matches.length>0) result.mmsi=matches[0].mmsi;
 }
 
+// Fetch position from MarineTraffic by scraping the vessel page
+async function getMTPosition(page, mmsi) {
+  try {
+    var captured = null;
+    // Intercept MT's internal latestPosition / vesselInfo API calls
+    await page.route('**/*', async function(route) {
+      var url = route.request().url();
+      if(url.indexOf('marinetraffic.com') >= 0 &&
+         (url.indexOf('latestPosition') >= 0 || url.indexOf('vesselInfo') >= 0 ||
+          url.indexOf('get_vessel') >= 0 || url.indexOf('getVesselInfo') >= 0)) {
+        var resp = await route.fetch();
+        var text = await resp.text();
+        try {
+          var d = JSON.parse(text);
+          var v = (d.data && d.data[0]) || d.data || d;
+          var la = parseFloat(v.LAT || v.lat || 0);
+          var lo = parseFloat(v.LON || v.lon || 0);
+          if(la && lo) {
+            captured = {
+              lat:   la,
+              lon:   lo,
+              speed: parseFloat(v.SPEED || v.speed || 0) / 10,
+              dest:  v.DESTINATION || v.destination || null,
+              name:  v.NAME || v.name || null,
+              source:'marinetraffic'
+            };
+          }
+        } catch(e) {}
+        await route.fulfill({response: resp});
+      } else {
+        await route.continue();
+      }
+    });
+    await page.goto('https://www.marinetraffic.com/en/ais/details/ships/mmsi:'+mmsi, {timeout:40000});
+    await page.waitForTimeout(10000);
+    await page.unroute('**/*');
+
+    // Fallback: parse __NEXT_DATA__ embedded JSON
+    if(!captured || !captured.lat) {
+      captured = await page.evaluate(function() {
+        var el = document.getElementById('__NEXT_DATA__');
+        if(!el) return null;
+        try {
+          var raw = el.textContent;
+          var la = raw.match(/"LAT"\s*:\s*"?([\-\d\.]+)"?/);
+          var lo = raw.match(/"LON"\s*:\s*"?([\-\d\.]+)"?/);
+          var sp = raw.match(/"SPEED"\s*:\s*"?([\d\.]+)"?/);
+          var ds = raw.match(/"DESTINATION"\s*:\s*"([^"]+)"/);
+          var nm = raw.match(/"SHIPNAME"\s*:\s*"([^"]+)"/);
+          if(la && lo) return {
+            lat:   parseFloat(la[1]), lon: parseFloat(lo[1]),
+            speed: sp ? parseFloat(sp[1])/10 : 0,
+            dest:  ds ? ds[1] : null,
+            name:  nm ? nm[1] : null,
+            source:'marinetraffic'
+          };
+        } catch(e) {}
+        return null;
+      });
+    }
+    if(captured && captured.lat) {
+      process.stderr.write("MT Position: "+JSON.stringify(captured)+"\n");
+      return captured;
+    }
+  } catch(e) {
+    process.stderr.write("MT error: "+e.message+"\n");
+  }
+  return null;
+}
+
 // Get live position from direct API endpoint (much faster than loading full page)
 if(result.mmsi){
   var apiUrl="https://www.myshiptracking.com/requests/vesselonmap.php?type=json&mmsi="+result.mmsi+"&_="+Date.now();
@@ -89,11 +159,13 @@ if(result.mmsi){
   },apiUrl);
   process.stderr.write("API response: "+apiResp.slice(0,100)+"\n");
 
-  // Response is tab-separated: lat\tlon\tspeed\ttimestamp
+  // Response is tab-separated: lat\tlon\tspeed\tage_minutes
   var parts=apiResp.trim().split(/\s+/);
   var lat=parts[0]?parseFloat(parts[0]):null;
   var lon=parts[1]?parseFloat(parts[1]):null;
   var speed=parts[2]?parseFloat(parts[2]):null;
+  var ageMin=parts[3]?parseInt(parts[3]):0;
+  process.stderr.write("MST data age: "+ageMin+" minutes\n");
 
   // Also get destination from vesselsonmaptemp which has more detail
   var destResp=await pg.evaluate(async function(mmsi){
@@ -113,9 +185,20 @@ if(result.mmsi){
     speed:  speed,
     dest:   dest,
     name:   name||TOYOTA_CARRIERS[result.mmsi]||"",
-    source: "myshiptracking"
+    source: "myshiptracking",
+    ageMin: ageMin
   };
   process.stderr.write("Position: "+JSON.stringify(result.position)+"\n");
+
+  // MST data stale (>60 min) — try MarineTraffic for fresher coordinates
+  if(ageMin > 60) {
+    process.stderr.write("MST data stale ("+ageMin+" min), trying MarineTraffic...\n");
+    var mtPos = await getMTPosition(pg, result.mmsi);
+    if(mtPos && mtPos.lat) {
+      result.position = Object.assign({}, result.position, mtPos,
+        {name: result.position.name || mtPos.name}); // keep known vessel name
+    }
+  }
 }
 
 process.stdout.write(JSON.stringify(result)+"\n");
