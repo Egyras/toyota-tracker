@@ -121,6 +121,26 @@ if(MMSI){
   var C=["HIGHWAY","LEADER","ACE","TOREADOR","MORNING"];
   var matches=rows.filter(function(r){return C.some(function(c){return r.vessel.toUpperCase().indexOf(c)>=0;});});
   result.total=rows.length;
+
+  // If multiple matches, score by European port history to find correct vessel
+  if(matches.length > 1){
+    process.stderr.write("Multiple matches ("+matches.length+"), scoring by Europe port history...\n");
+    var EUROPE=["ZEEBRUGGE","BREMERHAVEN","SOUTHAMPTON","ANTWERP","ROTTERDAM","MALMO","PALDISKI"];
+    for(var mi=0;mi<matches.length;mi++){
+      var m=matches[mi];
+      if(!m.mmsi) continue;
+      var vurl="https://www.myshiptracking.com/vessels/"+m.vessel.toLowerCase().replace(/\s+/g,"-")+"-mmsi-"+m.mmsi;
+      await pg.goto(vurl,{timeout:20000});
+      await pg.waitForTimeout(3000);
+      var vtext=await pg.textContent("body");
+      var europeCount=EUROPE.filter(function(p){return vtext.toUpperCase().includes(p);}).length;
+      m.europeScore=europeCount;
+      process.stderr.write(m.vessel+" europe score: "+europeCount+"\n");
+    }
+    // Sort by Europe score descending, pick best
+    matches.sort(function(a,b){return (b.europeScore||0)-(a.europeScore||0);});
+  }
+
   result.matches=matches;
   if(matches.length>0) result.mmsi=matches[0].mmsi;
 }
