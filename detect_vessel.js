@@ -1,5 +1,4 @@
 const{chromium}=require("playwright");
-const{chromium:stealthChromium}=(()=>{try{const{chromium:c}=require('playwright-extra');const s=require('playwright-extra-plugin-stealth');c.use(s());return{chromium:c};}catch(e){return{chromium:null};}})();
 const E=process.env.MST_EMAIL||"";
 const P=process.env.MST_PASSWORD||"";
 const D=process.argv[2];
@@ -19,19 +18,51 @@ var TOYOTA_CARRIERS={
   "477307600":"Morning Highway"
 };
 
-// MarineTraffic shipid map (MMSI → shipid) for direct vessel page URL
-var MT_SHIPID={
-  "431262000":"3658066",
-  "311995000":"359037",
-  "353100000":"360185",
-  "432817000":"548373",
-  "431816000":"548374",
-  "432985000":"583847",
-  "431912000":"583848",
-  "354910000":"360184",
-  "636022929":"5646498",
-  "477307600":"5646499"
-};
+// ShipFinder position scraper (server-side rendered HTML, no auth needed)
+function getShipFinderPosition(mmsi) {
+  return new Promise(function(resolve) {
+    var https = require('https');
+    var opts = {
+      hostname: 'www.shipfinder.com',
+      path: '/ship/detail/mmsi/' + mmsi,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html'
+      }
+    };
+    var req = https.get(opts, function(r) {
+      var d = '';
+      r.on('data', function(c) { d += c; });
+      r.on('end', function() {
+        try {
+          var latM = d.match(/(\d+)-(\d+\.\d+)\s*N/);
+          var lonM = d.match(/(\d+)-(\d+\.\d+)\s*E/);
+          if (!latM || !lonM) { resolve(null); return; }
+          var lat = parseFloat(latM[1]) + parseFloat(latM[2]) / 60;
+          var lon = parseFloat(lonM[1]) + parseFloat(lonM[2]) / 60;
+          var spdM = d.match(/Speed\uff1a.*?([\d\.]+)\s*kn/);
+          var crsM = d.match(/Course\uff1a.*?([\d\.]+)/);
+          var dstM = d.match(/Dest\uff1a.*?([A-Z][^<\|]+)/);
+          var updM = d.match(/Last update\uff1a.*?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
+          process.stderr.write('SF position: ' + lat + ',' + lon + (updM ? ' @ ' + updM[1] : '') + '\n');
+          resolve({
+            lat: lat,
+            lon: lon,
+            speed: spdM ? parseFloat(spdM[1]) : 0,
+            course: crsM ? parseFloat(crsM[1]) : 0,
+            dest: dstM ? dstM[1].trim() : null,
+            source: 'shipfinder'
+          });
+        } catch(e) { resolve(null); }
+      });
+    });
+    req.on('error', function(e) {
+      process.stderr.write('SF error: ' + e.message + '\n');
+      resolve(null);
+    });
+    req.setTimeout(15000, function() { req.destroy(); resolve(null); });
+  });
+}
 
 (async()=>{
 const br=await chromium.launch({headless:true});
@@ -94,97 +125,6 @@ if(MMSI){
   if(matches.length>0) result.mmsi=matches[0].mmsi;
 }
 
-// Fetch position from MarineTraffic using playwright-extra stealth (bypasses CF bot detection)
-async function getMTPosition(mmsi) {
-  var shipid = MT_SHIPID[mmsi];
-  var mtUrl = shipid
-    ? 'https://www.marinetraffic.com/en/ais/home/shipid:'+shipid+'/zoom:14'
-    : 'https://www.marinetraffic.com/en/ais/details/ships/mmsi:'+mmsi;
-  process.stderr.write("MT URL: "+mtUrl+"\n");
-  var mtBr, captured = null;
-  // Use stealth chromium if available, fall back to regular
-  var launcher = stealthChromium || chromium;
-  try {
-    mtBr = await launcher.launch({
-      headless: true,
-      args: ['--no-sandbox','--disable-blink-features=AutomationControlled']
-    });
-    var mtCtx = await mtBr.newContext({
-      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      viewport: {width:1280, height:800},
-      locale: 'en-US',
-      timezoneId: 'Europe/London'
-    });
-    var mtPg = await mtCtx.newPage();
-    await mtPg.addInitScript(function(){
-      Object.defineProperty(navigator,'webdriver',{get:function(){return false;}});
-      window.chrome={runtime:{}};
-    });
-
-    // Intercept MT's internal API calls to capture vessel data
-    await mtPg.route('**/*', async function(route){
-      var url = route.request().url();
-      if(url.indexOf('marinetraffic.com') >= 0 &&
-         (url.indexOf('get_info') >= 0 || url.indexOf('vesselInfo') >= 0 ||
-          url.indexOf('latestPosition') >= 0 || url.indexOf('get_vessel') >= 0)) {
-        var resp = await route.fetch();
-        var text = await resp.text();
-        try {
-          var d = JSON.parse(text);
-          var v = (d.data && d.data[0]) || d.data || d;
-          var la = parseFloat(v.LAT || v.lat || 0);
-          var lo = parseFloat(v.LON || v.lon || 0);
-          if(la && lo) captured = {
-            lat:la, lon:lo,
-            speed: parseFloat(v.SPEED||v.speed||0)/10,
-            course: parseFloat(v.COURSE||v.course||0),
-            dest: v.DESTINATION||v.destination||null,
-            name: v.NAME||v.SHIPNAME||null,
-            source:'marinetraffic'
-          };
-        } catch(e) {}
-        await route.fulfill({response:resp});
-      } else { await route.continue(); }
-    });
-
-    await mtPg.goto(mtUrl, {timeout:45000, waitUntil:'networkidle'});
-    await mtPg.waitForTimeout(5000);
-
-    // Fallback: parse coordinates from page text / __NEXT_DATA__
-    if(!captured || !captured.lat) {
-      captured = await mtPg.evaluate(function(){
-        // Try __NEXT_DATA__
-        var el = document.getElementById('__NEXT_DATA__');
-        var raw = (el ? el.textContent : '') + document.body.innerHTML;
-        var la = raw.match(/"LAT"\s*:\s*"?([\-\d\.]+)"?/);
-        var lo = raw.match(/"LON"\s*:\s*"?([\-\d\.]+)"?/);
-        var sp = raw.match(/"SPEED"\s*:\s*"?(\d+)"?/);
-        var cr = raw.match(/"COURSE"\s*:\s*"?(\d+)"?/);
-        var ds = raw.match(/"DESTINATION"\s*:\s*"([^"]+)"/);
-        var nm = raw.match(/"SHIPNAME"\s*:\s*"([^"]+)"/);
-        if(la && lo && parseFloat(la[1])!==0) return {
-          lat: parseFloat(la[1]), lon: parseFloat(lo[1]),
-          speed: sp ? parseFloat(sp[1])/10 : 0,
-          course: cr ? parseFloat(cr[1]) : 0,
-          dest: ds ? ds[1] : null,
-          name: nm ? nm[1] : null,
-          source:'marinetraffic'
-        };
-        return null;
-      });
-    }
-    if(captured && captured.lat)
-      process.stderr.write("MT Position: "+JSON.stringify(captured)+"\n");
-    else
-      process.stderr.write("MT: no position found\n");
-  } catch(e) {
-    process.stderr.write("MT error: "+e.message+"\n");
-  } finally {
-    if(mtBr) await mtBr.close();
-  }
-  return captured;
-}
-
 // Get live position from direct API endpoint (much faster than loading full page)
 if(result.mmsi){
   var apiUrl="https://www.myshiptracking.com/requests/vesselonmap.php?type=json&mmsi="+result.mmsi+"&_="+Date.now();
@@ -226,13 +166,13 @@ if(result.mmsi){
   };
   process.stderr.write("Position: "+JSON.stringify(result.position)+"\n");
 
-  // MST data stale (>60 min) — try MarineTraffic with stealth browser (incognito-like)
+  // MST data stale (>60 min) — try ShipFinder (server-side rendered, no bot detection)
   if(ageMin > 60) {
-    process.stderr.write("MST data stale ("+ageMin+" min), trying MarineTraffic...\n");
-    var mtPos = await getMTPosition(result.mmsi);
-    if(mtPos && mtPos.lat) {
-      result.position = Object.assign({}, result.position, mtPos,
-        {name: result.position.name || mtPos.name});
+    process.stderr.write("MST data stale ("+ageMin+" min), trying ShipFinder...\n");
+    var sfPos = await getShipFinderPosition(result.mmsi);
+    if(sfPos && sfPos.lat) {
+      result.position = Object.assign({}, result.position, sfPos,
+        {name: result.position.name});
     }
   }
 }
