@@ -887,7 +887,6 @@ TRACKER_PAGE = BASE + """
     map.fitBounds(latlngs,{padding:[30,30]});
 
     // Try to auto-detect and show vessel position
-    var orderHash = "{{ od.orderId | replace(' ','') }}";
     {% set has_left = delivs | selectattr('isVisited', 'in', ['inTransit','visited']) | list | length > 0 %}
     {% if has_left %}
     var vesselMarker = null;
