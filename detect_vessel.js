@@ -1,4 +1,5 @@
 const{chromium}=require("playwright");
+const{chromium:stealthChromium}=(()=>{try{const{chromium:c}=require('playwright-extra');const s=require('playwright-extra-plugin-stealth');c.use(s());return{chromium:c};}catch(e){return{chromium:null};}})();
 const E=process.env.MST_EMAIL||"";
 const P=process.env.MST_PASSWORD||"";
 const D=process.argv[2];
@@ -93,8 +94,7 @@ if(MMSI){
   if(matches.length>0) result.mmsi=matches[0].mmsi;
 }
 
-// Fetch position from MarineTraffic using a fresh stealth context (mimics incognito).
-// MT works fine without login in incognito — we just need to avoid headless bot detection.
+// Fetch position from MarineTraffic using playwright-extra stealth (bypasses CF bot detection)
 async function getMTPosition(mmsi) {
   var shipid = MT_SHIPID[mmsi];
   var mtUrl = shipid
@@ -102,16 +102,12 @@ async function getMTPosition(mmsi) {
     : 'https://www.marinetraffic.com/en/ais/details/ships/mmsi:'+mmsi;
   process.stderr.write("MT URL: "+mtUrl+"\n");
   var mtBr, captured = null;
+  // Use stealth chromium if available, fall back to regular
+  var launcher = stealthChromium || chromium;
   try {
-    // Launch a separate browser with stealth args — fresh profile = incognito behaviour
-    mtBr = await chromium.launch({
+    mtBr = await launcher.launch({
       headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-features=IsolateOrigins,site-per-process',
-        '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-      ]
+      args: ['--no-sandbox','--disable-blink-features=AutomationControlled']
     });
     var mtCtx = await mtBr.newContext({
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -120,9 +116,9 @@ async function getMTPosition(mmsi) {
       timezoneId: 'Europe/London'
     });
     var mtPg = await mtCtx.newPage();
-    // Hide webdriver flag
     await mtPg.addInitScript(function(){
       Object.defineProperty(navigator,'webdriver',{get:function(){return false;}});
+      window.chrome={runtime:{}};
     });
 
     // Intercept MT's internal API calls to capture vessel data
