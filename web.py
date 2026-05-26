@@ -1,14 +1,150 @@
 #!/usr/bin/env python3
 """Toyota Order Tracker — Flask web wrapper with anonymized stats collection."""
 import os, sys, json, sqlite3, subprocess
-from datetime import datetime
-from flask import Flask, render_template_string, request, g
+from datetime import datetime, timedelta
+from flask import Flask, render_template_string, request, g, jsonify
 
 app = Flask(__name__)
 
-USERNAME = os.environ.get("TOYOTA_USERNAME", "")
-PASSWORD = os.environ.get("TOYOTA_PASSWORD", "")
-DB_PATH  = os.environ.get("DB_PATH", "/data/stats.db")
+USERNAME     = os.environ.get("TOYOTA_USERNAME", "")
+PASSWORD     = os.environ.get("TOYOTA_PASSWORD", "")
+DB_PATH      = os.environ.get("DB_PATH", "/data/stats.db")
+MST_EMAIL    = os.environ.get("MST_EMAIL", "")
+MST_PASSWORD = os.environ.get("MST_PASSWORD", "")
+
+# Known Toyota Europe-route car carriers (K-Line HIGHWAY + NYK LEADER)
+# These regularly serve Nagoya/Yokkaichi → Singapore → Suez → Zeebrugge → Nordic
+TOYOTA_CARRIERS = {
+    "431262000": "Hamburg Highway",
+    "311995000": "Elbe Highway",
+    "353100000": "Galveston Highway",
+    "248910000": "Toreador",
+    "432817000": "Altair Leader",
+    "431816000": "Equuleus Leader",
+    "432985000": "Garnet Leader",
+    "431912000": "Sagittarius Leader",
+    "354910000": "Adriatic Highway",
+    "636022929": "Morning Claire",
+    "477307600": "Morning Highway",
+}
+
+def get_vessel_position(mmsi: str) -> dict | None:
+    """Get vessel position — scrape MyShipTracking first (free), fallback to aisstream/DataDocked."""
+    # Try MST scraper (free, same login we use for detection)
+    if MST_EMAIL and MST_PASSWORD:
+        try:
+            env = os.environ.copy()
+            env['MST_EMAIL']    = MST_EMAIL
+            env['MST_PASSWORD'] = MST_PASSWORD
+            result = subprocess.run(
+                ['node', '/app/detect_vessel.js', 'dummy', mmsi],
+                capture_output=True, text=True, timeout=60, env=env
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                data = json.loads(result.stdout)
+                pos  = data.get('position', {})
+                if pos.get('lat'):
+                    return {
+                        'mmsi':        mmsi,
+                        'name':        pos.get('name') or TOYOTA_CARRIERS.get(mmsi, 'Unknown'),
+                        'lat':         pos['lat'],
+                        'lon':         pos['lon'],
+                        'speed':       pos.get('speed', 0),
+                        'course':      0,
+                        'destination': pos.get('dest', ''),
+                        'updated':     pos.get('updated', ''),
+                        'source':      'myshiptracking',
+                    }
+        except Exception as e:
+            print(f"[vessel pos scraper] {e}", file=sys.stderr)
+
+    # Fallback: aisstream.io (free, terrestrial)
+    try:
+        pos = asyncio.run(_fetch_vessel_position(mmsi))
+        if pos:
+            return pos
+    except Exception:
+        pass
+
+    # Last resort: DataDocked (satellite, uses credits)
+    return _fetch_datadocked(mmsi)
+
+
+def _cache_vessel(db, order_hash: str, vessel: dict):
+    """Cache vessel detection result in DB."""
+    try:
+        db.execute("""
+            UPDATE checks SET vessel_mmsi=?, vessel_name=?, vessel_lat=?,
+                              vessel_lon=?, vessel_speed=?, vessel_course=?,
+                              vessel_dest=?, vessel_updated=?
+            WHERE order_hash=?
+        """, (
+            vessel.get("mmsi"), vessel.get("name"),
+            vessel.get("lat"), vessel.get("lon"),
+            vessel.get("speed"), vessel.get("course"),
+            vessel.get("destination"),
+            datetime.utcnow().isoformat(),
+            order_hash
+        ))
+        db.commit()
+    except Exception as e:
+        print(f"[vessel cache] {e}", file=sys.stderr)
+
+
+def detect_vessel_scraper(left_factory_date: str) -> dict | None:
+    """
+    Detect vessel by scraping MyShipTracking Nagoya port departures.
+    Uses Playwright with MST_EMAIL/MST_PASSWORD credentials.
+    Returns matched vessel dict or None.
+    """
+    if not MST_EMAIL or not MST_PASSWORD:
+        return None
+    try:
+        env = os.environ.copy()
+        env['MST_EMAIL']    = MST_EMAIL
+        env['MST_PASSWORD'] = MST_PASSWORD
+        result = subprocess.run(
+            ['node', '/app/detect_vessel.js', left_factory_date],
+            capture_output=True, text=True, timeout=60, env=env
+        )
+        if result.returncode != 0:
+            print(f"[vessel scraper] error: {result.stderr[:200]}", file=sys.stderr)
+            return None
+        data = json.loads(result.stdout)
+        matches = data.get('matches', [])
+        if not matches:
+            return None
+        # Return first match with MMSI
+        for m in matches:
+            if m.get('mmsi'):
+                return {
+                    'mmsi':   m['mmsi'],
+                    'name':   m['vessel'],
+                    'source': 'scraper',
+                    'time':   m.get('time', ''),
+                }
+        return None
+    except Exception as e:
+        print(f"[vessel scraper] {e}", file=sys.stderr)
+        return None
+
+
+def detect_vessel(left_factory_date: str) -> dict | None:
+    """Auto-detect vessel via MyShipTracking Nagoya departure scraper."""
+    if not left_factory_date:
+        return None
+    vessel = detect_vessel_scraper(left_factory_date)
+    if vessel:
+        pos = get_vessel_position(vessel['mmsi'])
+        if pos:
+            vessel.update(pos)
+    return vessel
+
+        if score > best_score:
+            best_score = score
+            best = r
+
+    return best if best_score >= 3 else None
 
 # ── Database ──────────────────────────────────────────────────────────────────
 
@@ -57,6 +193,11 @@ def get_db():
         sd_cols = [r[1] for r in db.execute("PRAGMA table_info(step_durations)").fetchall()]
         if 'observed' not in sd_cols:
             db.execute("ALTER TABLE step_durations ADD COLUMN observed INTEGER DEFAULT 0")
+        # Vessel tracking columns
+        for col in ['vessel_mmsi','vessel_name','vessel_lat','vessel_lon',
+                    'vessel_speed','vessel_course','vessel_dest','vessel_updated']:
+            if col not in cols:
+                db.execute(f"ALTER TABLE checks ADD COLUMN {col} TEXT")
         db.commit()
         g.db = db
     return g.db
@@ -644,6 +785,63 @@ TRACKER_PAGE = BASE + """
     <div id="route-map" style="height:280px;border-radius:8px;margin-bottom:1.25rem;
          border:1px solid var(--border);overflow:hidden;"></div>
 
+    <!-- Vessel tracking card (shown when vessel detected) -->
+    <div id="vessel-info" style="display:none;background:var(--surface2);border:1px solid var(--border);
+         border-radius:8px;padding:.85rem;margin-bottom:1.25rem;">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem;">
+        <div>
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;
+                      letter-spacing:.05em;margin-bottom:3px;">🚢 Vessel detected</div>
+          <div style="font-size:14px;font-weight:600;" id="vessel-name">—</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:2px;">
+            Speed: <span id="vessel-speed">—</span>
+            &nbsp;·&nbsp; Dest: <span id="vessel-dest">—</span>
+          </div>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-size:11px;color:var(--muted);">MMSI: <span id="vessel-mmsi">—</span></div>
+          <div style="font-size:10px;color:#3d444d;margin-top:2px;">Based on departure timing</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Manual MMSI override -->
+    <div style="margin-bottom:1.25rem;">
+      <details>
+        <summary style="font-size:11px;color:var(--muted);cursor:pointer;
+                        text-transform:uppercase;letter-spacing:.05em;">
+          🔧 Set vessel MMSI manually
+        </summary>
+        <div style="margin-top:.6rem;display:flex;gap:.5rem;">
+          <input id="mmsi-input" type="text" placeholder="e.g. 431262000"
+                 style="flex:1;background:var(--surface2);border:1px solid var(--border);
+                        color:var(--text);padding:7px 10px;border-radius:6px;
+                        font-size:13px;font-family:'Inter',sans-serif;outline:none;">
+          <button onclick="saveMMSI('{{ od.orderId }}')"
+                  style="background:var(--red);color:#fff;border:none;padding:7px 14px;
+                         border-radius:6px;font-size:13px;cursor:pointer;">Track</button>
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px;">
+          Find vessel on
+          <a href="https://www.myshiptracking.com" target="_blank">MyShipTracking</a> or
+          <a href="https://www.marinetraffic.com" target="_blank">MarineTraffic</a>
+        </div>
+      </details>
+    </div>
+    <script>
+    function saveMMSI(orderId) {
+      var mmsi = document.getElementById('mmsi-input').value.trim();
+      if(!mmsi) return;
+      localStorage.setItem('vessel_mmsi_'+orderId, mmsi);
+      fetch('/api/vessel/'+mmsi).then(r=>r.json()).then(d=>{
+        if(d.lat) {
+          // reload page to re-render with vessel
+          location.reload();
+        }
+      });
+    }
+    </script>
+
     {% for d in delivs %}
     {% set v = d.isVisited %}
     <div class="route-item">
@@ -693,6 +891,59 @@ TRACKER_PAGE = BASE + """
        .bindPopup('<b>'+s.name+'</b><br>'+s.type);
     });
     map.fitBounds(latlngs,{padding:[30,30]});
+
+    // Try to auto-detect and show vessel position
+    var orderHash = "{{ od.orderId | replace(' ','') }}";
+    {% set has_left = delivs | selectattr('isVisited', 'in', ['inTransit','visited']) | list | length > 0 %}
+    {% if has_left %}
+    var vesselMarker = null;
+    function loadVessel(mmsi, name, lat, lng, speed, course, dest) {
+      if (vesselMarker) map.removeLayer(vesselMarker);
+      var icon = L.divIcon({
+        className:'',
+        html:'<div style="font-size:22px;transform:rotate('+course+'deg);filter:drop-shadow(0 0 4px #fff);">🚢</div>',
+        iconSize:[28,28],iconAnchor:[14,14]
+      });
+      vesselMarker = L.marker([lat,lng],{icon:icon,zIndexOffset:1000}).addTo(map)
+        .bindPopup(
+          '<b>'+name+'</b><br>'+
+          'Speed: '+speed+' kn · Course: '+course+'°<br>'+
+          (dest?'Dest: '+dest+'<br>':'')+
+          '<small style="color:#aaa">MMSI: '+mmsi+'</small>'
+        );
+      // Add pulsing circle around vessel
+      L.circle([lat,lng],{
+        radius:200000,color:'#e5001a',fillColor:'#e5001a',
+        fillOpacity:0.05,weight:1,dashArray:'4 4'
+      }).addTo(map);
+      // Show vessel info card
+      var card = document.getElementById('vessel-info');
+      if(card){
+        document.getElementById('vessel-name').textContent = name;
+        document.getElementById('vessel-speed').textContent = speed+' knots';
+        document.getElementById('vessel-dest').textContent = dest||'—';
+        document.getElementById('vessel-mmsi').textContent = mmsi;
+        card.style.display='block';
+      }
+    }
+
+    // First check if user has manually set MMSI in localStorage
+    var savedMMSI = localStorage.getItem('vessel_mmsi_{{ od.orderId }}');
+    if(savedMMSI){
+      fetch('/api/vessel/'+savedMMSI)
+        .then(r=>r.json())
+        .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination); });
+    } else {
+      // Auto-detect based on leftTheFactory date
+      var hash = "{{ order._order_hash if order._order_hash else '' }}";
+      if(hash){
+        fetch('/api/vessel-detect/'+hash)
+          .then(r=>r.json())
+          .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination); })
+          .catch(()=>{});
+      }
+    }
+    {% endif %}
   })();
   </script>
   {% endif %}
@@ -999,6 +1250,8 @@ def index():
                            created_on=_order_dates.get(oid, ""))
                 details['_step_dates'] = step_dates.get("steps", {})
                 details['_created_on'] = _order_dates.get(oid, "")
+                import hashlib
+                details['_order_hash'] = hashlib.sha256(oid.encode()).hexdigest()[:16] if oid else ""
                 orders.append(details)
 
         except Exception as e:
@@ -1007,6 +1260,60 @@ def index():
     return render_template_string(TRACKER_PAGE,
                                   orders=orders, username=username,
                                   error=error, request=request)
+
+@app.route("/api/vessel/<mmsi>")
+def api_vessel(mmsi):
+    if mmsi not in TOYOTA_CARRIERS and not mmsi.isdigit():
+        return jsonify(error="invalid mmsi"), 400
+    pos = get_vessel_position(mmsi)
+    if not pos:
+        return jsonify(error="no position data"), 404
+    return jsonify(pos)
+
+@app.route("/api/vessel-detect/<order_hash>")
+def api_vessel_detect(order_hash):
+    db = get_db()
+
+    # Check cache first — only re-detect if >6 hours old
+    cached = db.execute("""
+        SELECT vessel_mmsi, vessel_name, vessel_lat, vessel_lon,
+               vessel_speed, vessel_course, vessel_dest, vessel_updated
+        FROM checks WHERE order_hash=?
+        AND vessel_mmsi IS NOT NULL
+        AND vessel_updated > datetime('now', '-6 hours')
+        LIMIT 1
+    """, (order_hash,)).fetchone()
+
+    if cached and cached["vessel_lat"]:
+        return jsonify({
+            "mmsi":        cached["vessel_mmsi"],
+            "name":        cached["vessel_name"],
+            "lat":         float(cached["vessel_lat"]),
+            "lon":         float(cached["vessel_lon"]),
+            "speed":       float(cached["vessel_speed"] or 0),
+            "course":      float(cached["vessel_course"] or 0),
+            "destination": cached["vessel_dest"] or "",
+            "cached":      True,
+        })
+
+    # Get leftTheFactory date for this order
+    row = db.execute("""
+        SELECT sd.date_entered
+        FROM step_durations sd
+        WHERE sd.order_hash=? AND sd.step='leftTheFactory'
+          AND sd.date_entered IS NOT NULL
+    """, (order_hash,)).fetchone()
+    if not row:
+        return jsonify(error="no leftTheFactory date"), 404
+
+    vessel = detect_vessel(row["date_entered"])
+    if not vessel:
+        return jsonify(error="no vessel detected"), 404
+
+    # Cache in DB
+    _cache_vessel(db, order_hash, vessel)
+
+    return jsonify({k: v for k, v in vessel.items() if not k.startswith("_")})
 
 @app.route("/stats/count")
 def stats_count():

@@ -2,8 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install git to clone toyota.py from source repo
-RUN apt-get update && apt-get install -y --no-install-recommends git \
+# System deps for Playwright Chromium
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl nodejs npm \
+    libnspr4 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+    libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
+    libgbm1 libpango-1.0-0 libcairo2 libatspi2.0-0 \
+    libasound2t64 libx11-6 libxcb1 libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
 # Fetch the Toyota API script
@@ -12,10 +17,17 @@ RUN git clone https://github.com/rmudingay/toyota.git /tmp/toyota \
     && rm -rf /tmp/toyota
 
 # Install Python dependencies
-RUN pip install --no-cache-dir requests flask
+RUN pip install --no-cache-dir requests flask playwright
 
-# Copy web wrapper
+# Install Playwright Chromium (Python)
+RUN playwright install chromium
+
+# Install Node Playwright for JS scraper
+RUN npm install -g playwright && npx playwright install chromium
+
+# Copy app files
 COPY web.py /app/web.py
+COPY detect_vessel.js /app/detect_vessel.js
 
 EXPOSE 8080
 

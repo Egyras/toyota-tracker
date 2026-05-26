@@ -2,11 +2,12 @@ pipeline {
     agent any
 
     environment {
-        IMAGE = 'vaikis/toyota-tracker'
-        TAG   = 'latest'
+        IMAGE        = 'vaikis/toyota-tracker'
+        TAG          = 'latest'
+        MST_EMAIL    = credentials('mst-email')
+        MST_PASSWORD = credentials('mst-password')
     }
 
-    // Polls Git repo every minute for new commits
     triggers {
         pollSCM('* * * * *')
     }
@@ -51,19 +52,24 @@ pipeline {
         stage('Deploy on TrueNAS') {
             steps {
                 sh """
-                    # Pull the freshly built image
                     docker pull ${IMAGE}:${TAG}
 
-                    # Stop and remove the old container (ignore errors if not running)
                     docker stop toyota-tracker || true
                     docker rm   toyota-tracker || true
 
-                    # Start new container with updated image
+                    OLDPORT=\$(docker ps -q --filter publish=8889)
+                    if [ -n "\$OLDPORT" ]; then
+                        docker stop \$OLDPORT || true
+                        docker rm   \$OLDPORT || true
+                    fi
+
                     docker run -d \
                         --name    toyota-tracker \
                         --restart unless-stopped \
                         -p        8889:8080 \
                         -e        DB_PATH=/data/stats.db \
+                        -e        MST_EMAIL="\${MST_EMAIL}" \
+                        -e        MST_PASSWORD="\${MST_PASSWORD}" \
                         -v        toyota-tracker-data:/data \
                         ${IMAGE}:${TAG}
 
@@ -75,7 +81,6 @@ pipeline {
 
     post {
         always {
-            // Remove dangling images to keep TrueNAS disk clean
             sh 'docker image prune -f --filter "dangling=true" || true'
         }
         success {
