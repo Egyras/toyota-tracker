@@ -16,14 +16,13 @@ RUN git clone https://github.com/rmudingay/toyota.git /tmp/toyota \
     && cp /tmp/toyota/toyota.py /app/toyota.py \
     && rm -rf /tmp/toyota
 
-# Install Python dependencies
-RUN pip install --no-cache-dir requests flask playwright
+# Install Python dependencies (no playwright here - using Node version)
+RUN pip install --no-cache-dir requests flask
 
-# Install Playwright Chromium (Python)
-RUN playwright install chromium
-
-# Install Node Playwright for JS scraper
-RUN npm install -g playwright && npx playwright install chromium
+# Install Node Playwright + Chromium for detect_vessel.js
+RUN npm install -g playwright --force \
+    && npx playwright install chromium \
+    && npx playwright install-deps chromium
 
 # Copy app files
 COPY web.py /app/web.py
