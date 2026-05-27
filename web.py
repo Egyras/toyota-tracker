@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Toyota Order Tracker — Flask web wrapper with anonymized stats collection."""
+"""Toyota Order Tracker — Flask web page wrapper with anonymized stats collection."""
 import os, sys, json, sqlite3, subprocess
 from datetime import datetime, timedelta
 from flask import Flask, render_template_string, request, g, jsonify
@@ -1344,8 +1344,9 @@ def api_vessel(mmsi):
 @app.route("/api/vessel-detect/<order_hash>", methods=["GET", "POST"])
 def api_vessel_detect(order_hash):
     db = get_db()
-    depart_date_override = request.args.get('depart_date') or (request.json or {}).get('depart_date')
-    mmsi_override        = request.args.get('mmsi')        or (request.json or {}).get('mmsi')
+    body = request.get_json(silent=True) or {}
+    depart_date_override = request.args.get('depart_date') or body.get('depart_date')
+    mmsi_override        = request.args.get('mmsi')        or body.get('mmsi')
     leg_override         = request.args.get('leg', 'nagoya')
 
     # If user provided a date or MMSI, save it to vessel_overrides
