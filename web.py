@@ -1337,28 +1337,63 @@ def api_vessel_detect(order_hash):
     depart_date_override = request.args.get('depart_date')
     leg_override = request.args.get('leg', 'nagoya')
 
-    # Check cache first — only re-detect if >6 hours old (skip cache if override provided)
+    # Check cache — serve if vessel already known (any age), only re-detect if never detected
     if not depart_date_override:
         cached = db.execute("""
             SELECT vessel_mmsi, vessel_name, vessel_lat, vessel_lon,
                    vessel_speed, vessel_course, vessel_dest, vessel_updated
             FROM checks WHERE order_hash=?
             AND vessel_mmsi IS NOT NULL
-            AND vessel_updated > datetime('now', '-6 hours')
             LIMIT 1
         """, (order_hash,)).fetchone()
 
         if cached and cached["vessel_lat"]:
-            return jsonify({
-                "mmsi":        cached["vessel_mmsi"],
-                "name":        cached["vessel_name"],
-                "lat":         float(cached["vessel_lat"]),
-                "lon":         float(cached["vessel_lon"]),
-                "speed":       float(cached["vessel_speed"] or 0),
-                "course":      float(cached["vessel_course"] or 0),
-                "destination": cached["vessel_dest"] or "",
-                "cached":      True,
-            })
+            # Re-fetch position if cache is >6 hours old
+            age_hours = db.execute("""
+                SELECT CAST((julianday('now') - julianday(vessel_updated)) * 24 AS INTEGER)
+                FROM checks WHERE order_hash=? AND vessel_mmsi IS NOT NULL LIMIT 1
+            """, (order_hash,)).fetchone()
+            stale = age_hours and age_hours[0] > 6
+
+            if not stale:
+                return jsonify({
+                    "mmsi":        cached["vessel_mmsi"],
+                    "name":        cached["vessel_name"],
+                    "lat":         float(cached["vessel_lat"]),
+                    "lon":         float(cached["vessel_lon"]),
+                    "speed":       float(cached["vessel_speed"] or 0),
+                    "course":      float(cached["vessel_course"] or 0),
+                    "destination": cached["vessel_dest"] or "",
+                    "cached":      True,
+                })
+            else:
+                # Cache is stale — refresh position only (don't re-detect vessel)
+                pos = get_vessel_position(cached["vessel_mmsi"])
+                if pos:
+                    _cache_vessel(db, order_hash, pos)
+                    return jsonify({
+                        "mmsi":        cached["vessel_mmsi"],
+                        "name":        pos.get("name") or cached["vessel_name"],
+                        "lat":         pos.get("lat", float(cached["vessel_lat"])),
+                        "lon":         pos.get("lon", float(cached["vessel_lon"])),
+                        "speed":       pos.get("speed", 0),
+                        "course":      pos.get("course", 0),
+                        "destination": pos.get("destination") or cached["vessel_dest"] or "",
+                        "cached":      False,
+                    })
+                else:
+                    # Can't get fresh position, serve stale cache
+                    return jsonify({
+                        "mmsi":        cached["vessel_mmsi"],
+                        "name":        cached["vessel_name"],
+                        "lat":         float(cached["vessel_lat"]),
+                        "lon":         float(cached["vessel_lon"]),
+                        "speed":       float(cached["vessel_speed"] or 0),
+                        "course":      float(cached["vessel_course"] or 0),
+                        "destination": cached["vessel_dest"] or "",
+                        "cached":      True,
+                        "stale":       True,
+                    })
 
     # Use override date or look up from DB
     if depart_date_override:
