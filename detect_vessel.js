@@ -11,19 +11,20 @@ var PORT_IDS = {
   "nagoya":       4715,
   "yokkaichi":    4716,
   "hiroshima":    4717,
-  // Leg 2: Zeebrugge onward (feeder to Malmo/Nordic)
+  // Leg 2: European hubs (deep-sea arrival)
   "zeebrugge":    187,
   "bremerhaven":  107,
   "antwerp":      48,
-  // Leg 3: Nordic distribution
+  "southampton":  390,   // UK direct arrival
+  "portbury":     2403,  // UK direct arrival (Bristol)
+  "livorno":      275,   // Italy direct arrival (alternates with Sagunto)
+  "sagunto":      362,   // Spain/Italy/Portugal arrival
+  // Leg 3: Nordic/Baltic distribution
   "malmo":        286,
   "gothenburg":   380,
-  // Final destinations (trucks from these ports)
   "paldiski":     5661,
+  // Other
   "vejle":        2593,
-  "southampton":  390,
-  "portbury":     2403,
-  "sagunto":      362,
 };
 
 // Toyota Europe carriers by leg
@@ -48,14 +49,18 @@ var TOYOTA_CARRIERS={
 };
 
 // Map Toyota delivery location codes to port leg + ID
+// Italy alternates between Livorno and Sagunto (deep-sea direct, not via Zeebrugge)
+// UK goes direct to Southampton or Portbury (not via Zeebrugge)
 var LOCATION_TO_PORT = {
-  "SU.TJ.1":  {leg:"nagoya",      pid:4715},  // Toyota City → vessel
-  "HB.ZB.1":  {leg:"zeebrugge",   pid:187},   // Zeebrugge → next
-  "HB.MA.1":  {leg:"malmo",       pid:286},   // Malmo → next
-  "HB.SG.1":  {leg:"zeebrugge",   pid:187},   // Singapore hub (routes through Zeebrugge)
-  "HB.VA.1":  {leg:"sagunto",     pid:362},   // Valencia hub
-  "HB.GO.1":  {leg:"gothenburg",  pid:380},   // Gothenburg hub
-  "HB.BR.1":  {leg:"bremerhaven", pid:107},   // Bremerhaven hub
+  "SU.TJ.1":  {leg:"nagoya",       pid:4715},  // Toyota City → vessel (all routes)
+  "HB.ZB.1":  {leg:"zeebrugge",    pid:187},   // Zeebrugge → feeder (Nordic/France/Spain)
+  "HB.MA.1":  {leg:"malmo",        pid:286},   // Malmö → Paldiski feeder
+  "HB.LI.1":  {leg:"livorno",      pid:275},   // Livorno → Italy distribution
+  "HB.SA.1":  {leg:"sagunto",      pid:362},   // Sagunto → Spain/Italy/Portugal
+  "HB.SO.1":  {leg:"southampton",  pid:390},   // Southampton → UK direct
+  "HB.PO.1":  {leg:"portbury",     pid:2403},  // Portbury → UK direct
+  "HB.GO.1":  {leg:"gothenburg",   pid:380},   // Gothenburg hub
+  "HB.BR.1":  {leg:"bremerhaven",  pid:107},   // Bremerhaven hub
 };
 
 function getShipFinderPosition(mmsi) {
