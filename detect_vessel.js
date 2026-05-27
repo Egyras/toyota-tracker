@@ -1,8 +1,35 @@
 const{chromium}=require("playwright");
 const E=process.env.MST_EMAIL||"";
 const P=process.env.MST_PASSWORD||"";
-const D=process.argv[2];
+const D=process.argv[2];   // leftTheFactory date OR visited date for intermediate legs
 const MMSI=process.argv[3]||"";
+const LEG=process.argv[4]||"nagoya"; // which leg to detect: nagoya|zeebrugge|malmo
+
+// MyShipTracking port IDs
+var PORT_IDS = {
+  // Leg 1: Japan departure ports
+  "nagoya":       4715,
+  "yokkaichi":    4716,
+  "hiroshima":    4717,
+  // Leg 2: Zeebrugge onward (feeder to Malmo/Nordic)
+  "zeebrugge":    187,
+  "bremerhaven":  107,
+  "antwerp":      48,
+  // Leg 3: Nordic distribution
+  "malmo":        286,
+  "gothenburg":   380,
+  // Final destinations (trucks from these ports)
+  "paldiski":     5661,
+  "vejle":        2593,
+  "southampton":  390,
+  "portbury":     2403,
+  "sagunto":      362,
+};
+
+// Toyota Europe carriers by leg
+var CARRIERS_LEG1 = ["HIGHWAY","LEADER","ACE","TOREADOR","MORNING"]; // Japan→Europe
+var CARRIERS_LEG2 = ["HIGHWAY","LEADER","ACE","MORNING","CELTIC","SIEM","HOEGH","VIKING","ANIARA"]; // Zeebrugge→Nordic
+var CARRIERS_LEG3 = ["LEADER","ACE","MORNING","SIEM","NORDANA","CELTIC"]; // Malmo→Paldiski
 
 var TOYOTA_CARRIERS={
   "431262000":"Hamburg Highway",
@@ -15,10 +42,22 @@ var TOYOTA_CARRIERS={
   "431912000":"Sagittarius Leader",
   "354910000":"Adriatic Highway",
   "636022929":"Morning Claire",
-  "477307600":"Morning Highway"
+  "477307600":"Morning Highway",
+  "357795000":"Triton Leader",
+  "636020245":"Spica Leader",
 };
 
-// ShipFinder position scraper (server-side rendered HTML, no auth needed)
+// Map Toyota delivery location codes to port leg + ID
+var LOCATION_TO_PORT = {
+  "SU.TJ.1":  {leg:"nagoya",      pid:4715},  // Toyota City → vessel
+  "HB.ZB.1":  {leg:"zeebrugge",   pid:187},   // Zeebrugge → next
+  "HB.MA.1":  {leg:"malmo",       pid:286},   // Malmo → next
+  "HB.SG.1":  {leg:"zeebrugge",   pid:187},   // Singapore hub (routes through Zeebrugge)
+  "HB.VA.1":  {leg:"sagunto",     pid:362},   // Valencia hub
+  "HB.GO.1":  {leg:"gothenburg",  pid:380},   // Gothenburg hub
+  "HB.BR.1":  {leg:"bremerhaven", pid:107},   // Bremerhaven hub
+};
+
 function getShipFinderPosition(mmsi) {
   return new Promise(function(resolve) {
     var https = require('https');
@@ -26,7 +65,7 @@ function getShipFinderPosition(mmsi) {
       hostname: 'www.shipfinder.com',
       path: '/ship/detail/mmsi/' + mmsi,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36',
         'Accept': 'text/html'
       }
     };
@@ -44,22 +83,19 @@ function getShipFinderPosition(mmsi) {
           var crsM = d.match(/Course\uff1a.*?([\d\.]+)/);
           var dstM = d.match(/Dest\uff1a.*?([A-Z][^<\|]+)/);
           var updM = d.match(/Last update\uff1a.*?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
-          process.stderr.write('SF position: ' + lat + ',' + lon + (updM ? ' @ ' + updM[1] : '') + '\n');
+          process.stderr.write('SF: '+lat+','+lon+(updM?' @ '+updM[1]:'')+'\n');
           resolve({
-            lat: lat,
-            lon: lon,
+            lat: lat, lon: lon,
             speed: spdM ? parseFloat(spdM[1]) : 0,
             course: crsM ? parseFloat(crsM[1]) : 0,
             dest: dstM ? dstM[1].trim() : null,
+            updated: updM ? updM[1] : null,
             source: 'shipfinder'
           });
         } catch(e) { resolve(null); }
       });
     });
-    req.on('error', function(e) {
-      process.stderr.write('SF error: ' + e.message + '\n');
-      resolve(null);
-    });
+    req.on('error', function(e) { resolve(null); });
     req.setTimeout(15000, function() { req.destroy(); resolve(null); });
   });
 }
@@ -77,7 +113,7 @@ for(var i=0;i<3;i++){
   try{await pg.click("[id*=accept]",{timeout:500});}catch(e){}
 }
 await pg.waitForTimeout(1000);
-await pg.evaluate(function(){ open_login_window(); });
+await pg.evaluate(function(){open_login_window();});
 await pg.waitForTimeout(2000);
 await pg.evaluate(function(creds){
   var em=document.querySelector("input[name=email]");
@@ -92,20 +128,26 @@ process.stderr.write("Logged in: "+(pg.url().indexOf("/login")===-1)+"\n");
 
 var result={};
 
-// If MMSI provided directly, skip detection and just get position
 if(MMSI){
+  // Position-only mode
   result.mmsi=MMSI;
-  result.matches=[{mmsi:MMSI,vessel:"",time:""}];
+  result.matches=[{mmsi:MMSI,vessel:TOYOTA_CARRIERS[MMSI]||"",time:""}];
 } else {
-  // Detect vessel from Nagoya departures
-  const lf=new Date(D+"T00:00:00Z");
-  const start=Math.floor((lf.getTime()-2*86400000)/1000);
-  const end=Math.floor((lf.getTime()-1*86400000)/1000);
-  const u="https://www.myshiptracking.com/ports-arrivals-departures/?mmsi=&pid=4715&type=2&time="+start+"_"+end+"&pp=100";
-  process.stderr.write("Departures URL: "+u+"\n");
+  // Detect vessel from port departures
+  var pid = PORT_IDS[LEG] || PORT_IDS["nagoya"];
+  var carriers = LEG === "nagoya" ? CARRIERS_LEG1 :
+                 LEG === "zeebrugge" || LEG === "malmo" ? CARRIERS_LEG2 : CARRIERS_LEG1;
+
+  // Departure window: 5 days before the date (compensates for late logins)
+  var lf=new Date(D+"T00:00:00Z");
+  var start=Math.floor((lf.getTime()-5*86400000)/1000);
+  var end=Math.floor(lf.getTime()/1000);
+  var u="https://www.myshiptracking.com/ports-arrivals-departures/?mmsi=&pid="+pid+"&type=2&time="+start+"_"+end+"&pp=200";
+  process.stderr.write("Port "+LEG+" (pid:"+pid+") URL: "+u+"\n");
   await pg.goto(u,{timeout:30000});
   await pg.waitForTimeout(6000);
-  const rows=await pg.evaluate(function(){
+
+  var rows=await pg.evaluate(function(){
     var tr=document.querySelectorAll("table tbody tr"),out=[];
     for(var i=0;i<tr.length;i++){
       var td=tr[i].querySelectorAll("td");
@@ -118,81 +160,65 @@ if(MMSI){
     }
     return out;
   });
-  var C=["HIGHWAY","LEADER","ACE","TOREADOR","MORNING"];
-  var matches=rows.filter(function(r){return C.some(function(c){return r.vessel.toUpperCase().indexOf(c)>=0;});});
-  result.total=rows.length;
 
-  // If multiple matches, score by European port history to find correct vessel
+  var C=carriers;
+  var matches=rows.filter(function(r){return C.some(function(c){return r.vessel.toUpperCase().indexOf(c)>=0;});});
+
+  // If multiple matches, score by European port history
   if(matches.length > 1){
-    process.stderr.write("Multiple matches ("+matches.length+"), scoring by Europe port history...\n");
-    var EUROPE=["ZEEBRUGGE","BREMERHAVEN","SOUTHAMPTON","ANTWERP","ROTTERDAM","MALMO","PALDISKI"];
+    process.stderr.write("Multiple matches ("+matches.length+"), scoring...\n");
+    var EUROPE=["ZEEBRUGGE","BREMERHAVEN","SOUTHAMPTON","ANTWERP","ROTTERDAM","MALMO","PALDISKI","PORTBURY","SAGUNTO","GOTHENBURG"];
     for(var mi=0;mi<matches.length;mi++){
       var m=matches[mi];
       if(!m.mmsi) continue;
-      var vurl="https://www.myshiptracking.com/vessels/"+m.vessel.toLowerCase().replace(/\s+/g,"-")+"-mmsi-"+m.mmsi;
-      await pg.goto(vurl,{timeout:20000});
-      await pg.waitForTimeout(3000);
-      var vtext=await pg.textContent("body");
-      var europeCount=EUROPE.filter(function(p){return vtext.toUpperCase().includes(p);}).length;
-      m.europeScore=europeCount;
-      process.stderr.write(m.vessel+" europe score: "+europeCount+"\n");
+      try {
+        var vurl="https://www.myshiptracking.com/vessels/"+m.vessel.toLowerCase().replace(/\s+/g,"-")+"-mmsi-"+m.mmsi;
+        await pg.goto(vurl,{timeout:20000});
+        await pg.waitForTimeout(3000);
+        var vtext=await pg.textContent("body");
+        m.europeScore=EUROPE.filter(function(p){return vtext.toUpperCase().includes(p);}).length;
+        process.stderr.write(m.vessel+": europeScore="+m.europeScore+"\n");
+      } catch(e) { m.europeScore=0; }
     }
-    // Sort by Europe score descending, pick best
     matches.sort(function(a,b){return (b.europeScore||0)-(a.europeScore||0);});
   }
 
+  result.total=rows.length;
   result.matches=matches;
+  result.leg=LEG;
   if(matches.length>0) result.mmsi=matches[0].mmsi;
 }
 
-// Get live position from direct API endpoint (much faster than loading full page)
+// Get position
 if(result.mmsi){
   var apiUrl="https://www.myshiptracking.com/requests/vesselonmap.php?type=json&mmsi="+result.mmsi+"&_="+Date.now();
-  process.stderr.write("Position API: "+apiUrl+"\n");
-  var apiResp=await pg.evaluate(async function(url){
-    var r=await fetch(url);
-    return await r.text();
-  },apiUrl);
-  process.stderr.write("API response: "+apiResp.slice(0,100)+"\n");
-
-  // Response is tab-separated: lat\tlon\tspeed\tage_minutes
+  var apiResp=await pg.evaluate(async function(url){var r=await fetch(url);return await r.text();},apiUrl);
+  process.stderr.write("MST API: "+apiResp.slice(0,80)+"\n");
   var parts=apiResp.trim().split(/\s+/);
   var lat=parts[0]?parseFloat(parts[0]):null;
   var lon=parts[1]?parseFloat(parts[1]):null;
   var speed=parts[2]?parseFloat(parts[2]):null;
-  var ageMin=parts[3]?parseInt(parts[3]):0;
-  process.stderr.write("MST data age: "+ageMin+" minutes\n");
+  var ageMin=parts[3]?parseInt(parts[3]):99999;
 
-  // Also get destination from vesselsonmaptemp which has more detail
   var destResp=await pg.evaluate(async function(mmsi){
     var url="https://www.myshiptracking.com/requests/vesselsonmaptempTTT.php?type=json&minlat=-90&maxlat=90&minlon=-180&maxlon=180&zoom=2&selid="+mmsi+"&seltype=0&timecode=-1&filters=%7B%7D";
-    var r=await fetch(url);
-    return await r.text();
+    var r=await fetch(url);return await r.text();
   },result.mmsi);
-
-  // Parse destination from line like: 7\t0\t431262000\tHAMBURG HIGHWAY\t34.91869\t136.72725\t7.1\t1.5\t25\t175\t27\t11\t\t1779311208\tJP YKK
-  var destMatch=destResp.match(result.mmsi+"\t([^\t]+)\t[\d\.]+\t[\d\.]+\t[\d\.]+\t[\d\.]+\t[\d]+\t[\d]+\t[\d]+\t[\d]+\t\t[\d]+\t([A-Z>][^\n\t]*)");
+  var destMatch=destResp.match(result.mmsi+"\t([^\t]+)\t[\\d\\.]+\t[\\d\\.]+\t[\\d\\.]+\t[\\d\\.]+\t[\\d]+\t[\\d]+\t[\\d]+\t[\\d]+\t\t[\\d]+\t([A-Z>][^\n\t]*)");
   var name=destMatch?destMatch[1].trim():null;
   var dest=destMatch?destMatch[2].trim().replace(/^>/,""):null;
 
   result.position={
-    lat:    lat,
-    lon:    lon,
-    speed:  speed,
-    dest:   dest,
-    name:   name||TOYOTA_CARRIERS[result.mmsi]||"",
-    source: "myshiptracking",
-    ageMin: ageMin
+    lat:lat, lon:lon, speed:speed, dest:dest,
+    name:name||TOYOTA_CARRIERS[result.mmsi]||"",
+    source:"myshiptracking", ageMin:ageMin
   };
-  process.stderr.write("Position: "+JSON.stringify(result.position)+"\n");
 
-  // MST data stale (>60 min) — try ShipFinder (server-side rendered, no bot detection)
-  if(ageMin > 60) {
-    process.stderr.write("MST data stale ("+ageMin+" min), trying ShipFinder...\n");
-    var sfPos = await getShipFinderPosition(result.mmsi);
-    if(sfPos && sfPos.lat) {
-      result.position = Object.assign({}, result.position, sfPos,
-        {name: result.position.name});
+  if(ageMin > 60){
+    process.stderr.write("MST stale ("+ageMin+"min), trying ShipFinder...\n");
+    var sfPos=await getShipFinderPosition(result.mmsi);
+    if(sfPos&&sfPos.lat){
+      result.position=Object.assign({},result.position,sfPos,{name:result.position.name});
     }
   }
 }

@@ -91,11 +91,10 @@ def _cache_vessel(db, order_hash: str, vessel: dict):
         print(f"[vessel cache] {e}", file=sys.stderr)
 
 
-def detect_vessel_scraper(left_factory_date: str) -> dict | None:
+def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya") -> dict | None:
     """
-    Detect vessel by scraping MyShipTracking Nagoya port departures.
-    Uses Playwright with MST_EMAIL/MST_PASSWORD credentials.
-    Returns matched vessel dict or None.
+    Detect vessel by scraping MyShipTracking port departures.
+    leg: nagoya (default), zeebrugge, malmo, bremerhaven etc.
     """
     if not MST_EMAIL or not MST_PASSWORD:
         return None
@@ -104,8 +103,8 @@ def detect_vessel_scraper(left_factory_date: str) -> dict | None:
         env['MST_EMAIL']    = MST_EMAIL
         env['MST_PASSWORD'] = MST_PASSWORD
         result = subprocess.run(
-            ['node', '/app/detect_vessel.js', left_factory_date],
-            capture_output=True, text=True, timeout=60, env=env
+            ['node', '/app/detect_vessel.js', left_factory_date, '', leg],
+            capture_output=True, text=True, timeout=120, env=env
         )
         if result.returncode != 0:
             print(f"[vessel scraper] error: {result.stderr[:200]}", file=sys.stderr)
@@ -114,14 +113,14 @@ def detect_vessel_scraper(left_factory_date: str) -> dict | None:
         matches = data.get('matches', [])
         if not matches:
             return None
-        # Return first match with MMSI
         for m in matches:
             if m.get('mmsi'):
                 return {
                     'mmsi':   m['mmsi'],
-                    'name':   m['vessel'],
+                    'name':   m.get('vessel', ''),
                     'source': 'scraper',
                     'time':   m.get('time', ''),
+                    'leg':    leg,
                 }
         return None
     except Exception as e:
@@ -797,6 +796,8 @@ TRACKER_PAGE = BASE + """
           <div style="font-size:10px;color:#3d444d;margin-top:2px;">Based on departure timing</div>
         </div>
       </div>
+      <!-- External tracking links -->
+      <div style="display:flex;gap:.5rem;margin-top:.75rem;flex-wrap:wrap;" id="vessel-links"></div>
     </div>
 
     <!-- Manual vessel override -->
