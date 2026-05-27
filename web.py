@@ -185,6 +185,7 @@ def get_db():
                 detected_mmsi TEXT,
                 detected_name TEXT,
                 detected_at   TEXT,
+                created_at    TEXT DEFAULT (datetime('now')),
                 source        TEXT,
                 UNIQUE(order_hash, leg)
             );
@@ -1515,8 +1516,8 @@ def api_vessel_detect(order_hash):
     # If user provided a date or MMSI, save it to vessel_overrides
     if depart_date_override or mmsi_override:
         db.execute("""
-            INSERT INTO vessel_overrides (order_hash, leg, depart_date, mmsi, source)
-            VALUES (?, ?, ?, ?, 'user')
+            INSERT INTO vessel_overrides (order_hash, leg, depart_date, mmsi, source, created_at)
+            VALUES (?, ?, ?, ?, 'user', datetime('now'))
             ON CONFLICT(order_hash, leg) DO UPDATE SET
                 depart_date = COALESCE(excluded.depart_date, depart_date),
                 mmsi        = COALESCE(excluded.mmsi, mmsi),
