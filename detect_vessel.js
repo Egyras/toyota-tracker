@@ -24,6 +24,7 @@ var PORT_IDS = {
   "gothenburg":   380,    // Sweden
   "paldiski":     5661,   // Estonia → Baltic states truck
   "drammen":      5130,   // Norway — 70% of all Norwegian car imports
+  "piraeus":      445,    // Greece — direct Mediterranean route
   // Other
   "vejle":        2593,   // Denmark
 };
@@ -63,6 +64,7 @@ var LOCATION_NAME_TO_LEG = {
   "puerto de sagunto":    "sagunto",
   "sagunto":              "sagunto",
   "drammen":              "drammen",
+  "piraeus":              "piraeus",
   "gothenburg":           "gothenburg",
   "göteborg":             "gothenburg",
 };
