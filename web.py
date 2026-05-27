@@ -794,6 +794,7 @@ TRACKER_PAGE = BASE + """
               {% set rel_bg = 'rgba(139,148,158,0.15)' %}
               {% set rel_border = 'rgba(139,148,158,0.3)' %}
               {% set rel_color = 'var(--muted)' %}
+              {% set rel_accurate = false %}
             {% elif days_gap <= 1 %}
               {% set rel_icon = '✓' %}
               {% set rel_label = 'Accurate' %}
@@ -801,6 +802,7 @@ TRACKER_PAGE = BASE + """
               {% set rel_bg = 'rgba(63,185,80,0.1)' %}
               {% set rel_border = 'rgba(63,185,80,0.3)' %}
               {% set rel_color = 'var(--green)' %}
+              {% set rel_accurate = true %}
             {% elif days_gap <= 3 %}
               {% set rel_icon = '~' %}
               {% set rel_label = '±' ~ days_gap ~ ' days' %}
@@ -808,6 +810,7 @@ TRACKER_PAGE = BASE + """
               {% set rel_bg = 'rgba(227,179,65,0.1)' %}
               {% set rel_border = 'rgba(227,179,65,0.3)' %}
               {% set rel_color = '#e3b341' %}
+              {% set rel_accurate = false %}
             {% else %}
               {% set rel_icon = '?' %}
               {% set rel_label = 'Rough estimate' %}
@@ -815,6 +818,7 @@ TRACKER_PAGE = BASE + """
               {% set rel_bg = 'rgba(229,0,26,0.08)' %}
               {% set rel_border = 'rgba(229,0,26,0.25)' %}
               {% set rel_color = 'var(--red)' %}
+              {% set rel_accurate = false %}
             {% endif %}
             {% for event, date in step_dates[step_name].items() %}
             <div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap;">
@@ -830,11 +834,16 @@ TRACKER_PAGE = BASE + """
               </div>
             </div>
             {% endfor %}
-            {% if order._logins == 1 %}
-            <div style="font-size:10px;color:var(--muted);margin-top:4px;
-                        padding:4px 8px;background:rgba(139,148,158,0.08);
-                        border-radius:4px;border-left:2px solid var(--muted);">
-              Log in more often for accurate dates
+            {% if not rel_accurate %}
+            <div style="margin-top:8px;padding:8px 10px;
+                        background:rgba(229,0,26,0.06);
+                        border:1px solid rgba(229,0,26,0.2);
+                        border-radius:6px;font-size:11px;color:var(--muted);
+                        line-height:1.5;">
+              📅 For accurate vessel detection, enter the date from your
+              <strong style="color:var(--text);">Toyota notification email</strong>
+              in the <strong style="color:var(--text);">Delivery Route</strong> section below and click
+              <strong style="color:var(--red);">🔍 Detect</strong>
             </div>
             {% endif %}
           {% endif %}
