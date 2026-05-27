@@ -786,29 +786,55 @@ TRACKER_PAGE = BASE + """
           {% endif %}
           <span class="badge badge-{{ s }}" style="margin-top:5px;">{{ s }}</span>
           {% if step_name in step_dates %}
-            {% for event, date in step_dates[step_name].items() %}
-            {% set days_gap = order._days_tracked // [order._logins - 1, 1] | max if order._logins > 1 else 99 %}
-            {% if days_gap <= 1 %}
-              {% set reliability = '✅' %}
-              {% set rel_title = 'High accuracy — logged in daily' %}
+            {% set days_gap = (order._days_tracked // [order._logins - 1, 1] | max) if order._logins > 1 else 99 %}
+            {% if order._logins == 1 %}
+              {% set rel_icon = '⚠️' %}
+              {% set rel_label = 'Estimated' %}
+              {% set rel_desc = 'First login — shows when you checked, not when step happened' %}
+              {% set rel_bg = 'rgba(139,148,158,0.15)' %}
+              {% set rel_border = 'rgba(139,148,158,0.3)' %}
+              {% set rel_color = 'var(--muted)' %}
+            {% elif days_gap <= 1 %}
+              {% set rel_icon = '✓' %}
+              {% set rel_label = 'Accurate' %}
+              {% set rel_desc = 'Logged in daily — date is reliable' %}
+              {% set rel_bg = 'rgba(63,185,80,0.1)' %}
+              {% set rel_border = 'rgba(63,185,80,0.3)' %}
               {% set rel_color = 'var(--green)' %}
             {% elif days_gap <= 3 %}
-              {% set reliability = '🟡' %}
-              {% set rel_title = 'Moderate accuracy — checked every ' ~ days_gap ~ ' days' %}
+              {% set rel_icon = '~' %}
+              {% set rel_label = '±' ~ days_gap ~ ' days' %}
+              {% set rel_desc = 'Checked every ' ~ days_gap ~ ' days — date may be slightly off' %}
+              {% set rel_bg = 'rgba(227,179,65,0.1)' %}
+              {% set rel_border = 'rgba(227,179,65,0.3)' %}
               {% set rel_color = '#e3b341' %}
             {% else %}
-              {% set reliability = '⚠️' %}
-              {% set rel_title = 'Low accuracy — checked infrequently, date may be off by days' %}
-              {% set rel_color = 'var(--muted)' %}
+              {% set rel_icon = '?' %}
+              {% set rel_label = 'Rough estimate' %}
+              {% set rel_desc = 'Checked infrequently — date could be off by ' ~ days_gap ~ '+ days' %}
+              {% set rel_bg = 'rgba(229,0,26,0.08)' %}
+              {% set rel_border = 'rgba(229,0,26,0.25)' %}
+              {% set rel_color = 'var(--red)' %}
             {% endif %}
-            <div style="font-size:11px;color:var(--red);margin-top:3px;display:flex;align-items:center;gap:4px;">
-              {{ event }}: {{ date }}
-              <span title="{{ rel_title }}" style="cursor:help;font-size:10px;">{{ reliability }}</span>
+            {% for event, date in step_dates[step_name].items() %}
+            <div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap;">
+              <div style="font-size:12px;color:var(--red);font-weight:500;">{{ event }}: {{ date }}</div>
+              <div title="{{ rel_desc }}"
+                   style="display:inline-flex;align-items:center;gap:4px;
+                          background:{{ rel_bg }};border:1px solid {{ rel_border }};
+                          border-radius:20px;padding:2px 8px;cursor:help;
+                          font-size:10px;font-weight:600;color:{{ rel_color }};
+                          letter-spacing:.03em;white-space:nowrap;">
+                <span>{{ rel_icon }}</span>
+                <span>{{ rel_label }}</span>
+              </div>
             </div>
             {% endfor %}
             {% if order._logins == 1 %}
-            <div style="font-size:10px;color:var(--muted);margin-top:2px;">
-              ⚠️ First login — date shows when you logged in, not when step happened
+            <div style="font-size:10px;color:var(--muted);margin-top:4px;
+                        padding:4px 8px;background:rgba(139,148,158,0.08);
+                        border-radius:4px;border-left:2px solid var(--muted);">
+              Log in more often for accurate dates
             </div>
             {% endif %}
           {% endif %}
