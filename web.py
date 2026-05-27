@@ -176,6 +176,18 @@ def get_db():
                 observed      INTEGER DEFAULT 0,
                 UNIQUE(order_hash, step)
             );
+            CREATE TABLE IF NOT EXISTS vessel_overrides (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_hash    TEXT NOT NULL,
+                leg           TEXT NOT NULL DEFAULT 'nagoya',
+                depart_date   TEXT,
+                mmsi          TEXT,
+                detected_mmsi TEXT,
+                detected_name TEXT,
+                detected_at   TEXT,
+                source        TEXT,
+                UNIQUE(order_hash, leg)
+            );
             -- migrate: add created_on if upgrading from older schema
             CREATE TABLE IF NOT EXISTS _migrations (id INTEGER PRIMARY KEY);
         """)
@@ -1329,16 +1341,39 @@ def api_vessel(mmsi):
         return jsonify(error="no position data"), 404
     return jsonify(pos)
 
-@app.route("/api/vessel-detect/<order_hash>")
+@app.route("/api/vessel-detect/<order_hash>", methods=["GET", "POST"])
 def api_vessel_detect(order_hash):
     db = get_db()
+    depart_date_override = request.args.get('depart_date') or (request.json or {}).get('depart_date')
+    mmsi_override        = request.args.get('mmsi')        or (request.json or {}).get('mmsi')
+    leg_override         = request.args.get('leg', 'nagoya')
 
-    # Allow manual departure date and leg override via query params
-    depart_date_override = request.args.get('depart_date')
-    leg_override = request.args.get('leg', 'nagoya')
+    # If user provided a date or MMSI, save it to vessel_overrides
+    if depart_date_override or mmsi_override:
+        db.execute("""
+            INSERT INTO vessel_overrides (order_hash, leg, depart_date, mmsi, source)
+            VALUES (?, ?, ?, ?, 'user')
+            ON CONFLICT(order_hash, leg) DO UPDATE SET
+                depart_date = COALESCE(excluded.depart_date, depart_date),
+                mmsi        = COALESCE(excluded.mmsi, mmsi),
+                source      = 'user'
+        """, (order_hash, leg_override, depart_date_override, mmsi_override))
+        db.commit()
 
-    # Check cache — serve if vessel already known (any age), only re-detect if never detected
-    if not depart_date_override:
+    # Check vessel_overrides for user-provided MMSI (highest priority)
+    override = db.execute("""
+        SELECT depart_date, mmsi, detected_mmsi, detected_name, detected_at
+        FROM vessel_overrides WHERE order_hash=? AND leg=?
+    """, (order_hash, leg_override)).fetchone()
+
+    # If user set MMSI manually, use it directly
+    if override and override['mmsi'] and not depart_date_override:
+        pos = get_vessel_position(override['mmsi'])
+        if pos:
+            return jsonify({**pos, "source": "user_override", "leg": leg_override})
+
+    # Check position cache — serve if vessel known, refresh position if stale
+    if not depart_date_override and not mmsi_override:
         cached = db.execute("""
             SELECT vessel_mmsi, vessel_name, vessel_lat, vessel_lon,
                    vessel_speed, vessel_course, vessel_dest, vessel_updated
@@ -1348,12 +1383,11 @@ def api_vessel_detect(order_hash):
         """, (order_hash,)).fetchone()
 
         if cached and cached["vessel_lat"]:
-            # Re-fetch position if cache is >6 hours old
-            age_hours = db.execute("""
+            age = db.execute("""
                 SELECT CAST((julianday('now') - julianday(vessel_updated)) * 24 AS INTEGER)
                 FROM checks WHERE order_hash=? AND vessel_mmsi IS NOT NULL LIMIT 1
             """, (order_hash,)).fetchone()
-            stale = age_hours and age_hours[0] > 6
+            stale = age and age[0] > 6
 
             if not stale:
                 return jsonify({
@@ -1367,43 +1401,31 @@ def api_vessel_detect(order_hash):
                     "cached":      True,
                 })
             else:
-                # Cache is stale — refresh position only (don't re-detect vessel)
                 pos = get_vessel_position(cached["vessel_mmsi"])
                 if pos:
                     _cache_vessel(db, order_hash, pos)
-                    return jsonify({
-                        "mmsi":        cached["vessel_mmsi"],
-                        "name":        pos.get("name") or cached["vessel_name"],
-                        "lat":         pos.get("lat", float(cached["vessel_lat"])),
-                        "lon":         pos.get("lon", float(cached["vessel_lon"])),
-                        "speed":       pos.get("speed", 0),
-                        "course":      pos.get("course", 0),
-                        "destination": pos.get("destination") or cached["vessel_dest"] or "",
-                        "cached":      False,
-                    })
-                else:
-                    # Can't get fresh position, serve stale cache
-                    return jsonify({
-                        "mmsi":        cached["vessel_mmsi"],
-                        "name":        cached["vessel_name"],
-                        "lat":         float(cached["vessel_lat"]),
-                        "lon":         float(cached["vessel_lon"]),
-                        "speed":       float(cached["vessel_speed"] or 0),
-                        "course":      float(cached["vessel_course"] or 0),
-                        "destination": cached["vessel_dest"] or "",
-                        "cached":      True,
-                        "stale":       True,
-                    })
+                    return jsonify({**pos, "cached": False})
+                return jsonify({
+                    "mmsi":        cached["vessel_mmsi"],
+                    "name":        cached["vessel_name"],
+                    "lat":         float(cached["vessel_lat"]),
+                    "lon":         float(cached["vessel_lon"]),
+                    "speed":       float(cached["vessel_speed"] or 0),
+                    "course":      float(cached["vessel_course"] or 0),
+                    "destination": cached["vessel_dest"] or "",
+                    "cached":      True, "stale": True,
+                })
 
-    # Use override date or look up from DB
+    # Determine departure date to use
     if depart_date_override:
         left_factory_date = depart_date_override
+    elif override and override['depart_date']:
+        left_factory_date = override['depart_date']  # use saved user date
     else:
         row = db.execute("""
-            SELECT sd.date_entered
-            FROM step_durations sd
+            SELECT sd.date_entered FROM step_durations sd
             WHERE sd.order_hash=? AND sd.step='leftTheFactory'
-              AND sd.date_entered IS NOT NULL
+            AND sd.date_entered IS NOT NULL
         """, (order_hash,)).fetchone()
         if not row:
             return jsonify(error="no leftTheFactory date"), 404
@@ -1413,8 +1435,20 @@ def api_vessel_detect(order_hash):
     if not vessel:
         return jsonify(error="no vessel detected"), 404
 
-    # Cache in DB
+    # Save detection result to vessel_overrides
+    db.execute("""
+        INSERT INTO vessel_overrides (order_hash, leg, depart_date, detected_mmsi, detected_name, detected_at, source)
+        VALUES (?, ?, ?, ?, ?, datetime('now'), 'auto')
+        ON CONFLICT(order_hash, leg) DO UPDATE SET
+            detected_mmsi = excluded.detected_mmsi,
+            detected_name = excluded.detected_name,
+            detected_at   = excluded.detected_at,
+            source        = CASE WHEN mmsi IS NOT NULL THEN 'user' ELSE 'auto' END
+    """, (order_hash, leg_override, left_factory_date,
+          vessel.get('mmsi'), vessel.get('name')))
+
     _cache_vessel(db, order_hash, vessel)
+    db.commit()
 
     return jsonify({k: v for k, v in vessel.items() if not k.startswith("_")})
 
