@@ -175,23 +175,32 @@ if(MMSI){
   var C=carriers;
   var matches=rows.filter(function(r){return C.some(function(c){return r.vessel.toUpperCase().indexOf(c)>=0;});});
 
-  // If multiple matches, score by European port history
-  if(matches.length > 1){
-    process.stderr.write("Multiple matches ("+matches.length+"), scoring...\n");
-    var EUROPE=["ZEEBRUGGE","BREMERHAVEN","SOUTHAMPTON","ANTWERP","ROTTERDAM","MALMO","PALDISKI","PORTBURY","SAGUNTO","GOTHENBURG"];
+  // Always score ALL matches by Europe port history — even single match
+  // This prevents false positives from carriers going to Americas/Asia/Pacific
+  var EUROPE=["ZEEBRUGGE","BREMERHAVEN","SOUTHAMPTON","ANTWERP","ROTTERDAM",
+              "MALMO","PALDISKI","PORTBURY","SAGUNTO","GOTHENBURG","LIVORNO",
+              "PIRAEUS","DRAMMEN","ONNAING","VALENCIA"];
+  if(matches.length > 0){
+    process.stderr.write("Scoring "+matches.length+" match(es) by Europe port history...\n");
     for(var mi=0;mi<matches.length;mi++){
       var m=matches[mi];
-      if(!m.mmsi) continue;
-      try {
-        var vurl="https://www.myshiptracking.com/vessels/"+m.vessel.toLowerCase().replace(/\s+/g,"-")+"-mmsi-"+m.mmsi;
+      if(!m.mmsi){ m.europeScore=0; continue; }
+      try{
+        var vurl="https://www.myshiptracking.com/vessels/"+
+                 m.vessel.toLowerCase().replace(/\s+/g,"-")+"-mmsi-"+m.mmsi;
         await pg.goto(vurl,{timeout:20000});
         await pg.waitForTimeout(3000);
         var vtext=await pg.textContent("body");
         m.europeScore=EUROPE.filter(function(p){return vtext.toUpperCase().includes(p);}).length;
         process.stderr.write(m.vessel+": europeScore="+m.europeScore+"\n");
-      } catch(e) { m.europeScore=0; }
+      }catch(e){ m.europeScore=0; }
     }
     matches.sort(function(a,b){return (b.europeScore||0)-(a.europeScore||0);});
+    // Reject all if best match has no European ports — it's not a Europe route vessel
+    if((matches[0].europeScore||0) === 0){
+      process.stderr.write("Best match "+matches[0].vessel+" europeScore=0, rejecting — not Europe route\n");
+      matches=[];
+    }
   }
 
   result.total=rows.length;
