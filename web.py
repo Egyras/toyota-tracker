@@ -128,11 +128,11 @@ def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya") -> dict |
         return None
 
 
-def detect_vessel(left_factory_date: str) -> dict | None:
-    """Auto-detect vessel via MyShipTracking Nagoya departure scraper."""
+def detect_vessel(left_factory_date: str, leg: str = "nagoya") -> dict | None:
+    """Auto-detect vessel via MyShipTracking port departure scraper."""
     if not left_factory_date:
         return None
-    vessel = detect_vessel_scraper(left_factory_date)
+    vessel = detect_vessel_scraper(left_factory_date, leg=leg)
     if vessel:
         pos = get_vessel_position(vessel['mmsi'])
         if pos:
@@ -919,26 +919,125 @@ TRACKER_PAGE = BASE + """
 
     {% for d in delivs %}
     {% set v = d.isVisited %}
-    <div class="route-item">
-      <div class="route-icon">
-        {% if d.destinationType == 'FACTORY' %}🏭
-        {% elif d.destinationType == 'HUB' %}🔀
-        {% elif d.destinationType == 'TRANSIT' %}🚢
-        {% elif d.destinationType == 'DESTINATION' %}📍
-        {% else %}📦{% endif %}
+    {% set is_vessel = d.transportMethod == 'Vessel' or d.destinationType in ['FACTORY','HUB'] %}
+    {% set leg_key = 'nagoya' if d.destinationType == 'FACTORY' else
+                     'zeebrugge' if 'Zeebrugge' in d.locationName else
+                     'malmo' if 'Malmo' in d.locationName or 'Malmö' in d.locationName else
+                     'bremerhaven' if 'Bremerhaven' in d.locationName else
+                     'southampton' if 'Southampton' in d.locationName else
+                     'gothenburg' if 'Gothenburg' in d.locationName else 'nagoya' %}
+    <div class="route-item" style="flex-direction:column;align-items:stretch;gap:0;">
+      <div style="display:flex;align-items:center;gap:12px;padding:2px 0;">
+        <div class="route-icon">
+          {% if d.destinationType == 'FACTORY' %}🏭
+          {% elif d.destinationType == 'HUB' %}🔀
+          {% elif d.destinationType == 'TRANSIT' %}🚢
+          {% elif d.destinationType == 'DESTINATION' %}📍
+          {% else %}📦{% endif %}
+        </div>
+        <div style="flex:1;">
+          <div class="route-name">{{ d.locationName }}, {{ d.countryName }}</div>
+          <div class="route-type">{{ d.destinationType }}
+            {% if d.transportMethod %} · {{ d.transportMethod }}{% endif %}</div>
+        </div>
+        <span class="badge
+          {% if v == 'visited' %}badge-visited
+          {% elif v == 'inTransit' %}badge-current
+          {% else %}badge-pending{% endif %}">{{ v }}</span>
       </div>
-      <div style="flex:1;">
-        <div class="route-name">{{ d.locationName }}, {{ d.countryName }}</div>
-        <div class="route-type">{{ d.destinationType }}
-          {% if d.transportMethod %} · {{ d.transportMethod }}{% endif %}</div>
+      {% if is_vessel and v in ['inTransit', 'notVisited'] %}
+      <div style="margin:6px 0 2px 44px;display:flex;gap:6px;flex-wrap:wrap;">
+        <input type="date" id="date-{{ leg_key }}"
+               placeholder="Departure date"
+               style="flex:1;min-width:120px;background:var(--bg);border:1px solid var(--border);
+                      color:var(--text);padding:6px 10px;border-radius:6px;
+                      font-size:12px;font-family:'Inter',sans-serif;outline:none;"
+               onfocus="this.style.borderColor='var(--red)'"
+               onblur="this.style.borderColor='var(--border)'"
+               title="Enter the date Toyota notified you the car departed this location">
+        <input type="text" id="mmsi-{{ leg_key }}"
+               placeholder="MMSI (optional)"
+               style="flex:1;min-width:110px;background:var(--bg);border:1px solid var(--border);
+                      color:var(--text);padding:6px 10px;border-radius:6px;
+                      font-size:12px;font-family:'Inter',sans-serif;outline:none;"
+               onfocus="this.style.borderColor='var(--red)'"
+               onblur="this.style.borderColor='var(--border)'"
+               title="Enter vessel MMSI if known">
+        <button onclick="detectLeg('{{ leg_key }}','{{ order._order_hash }}','{{ od.orderId }}')"
+                style="background:var(--surface2);color:var(--text);border:1px solid var(--border);
+                       padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer;
+                       white-space:nowrap;"
+                onmouseover="this.style.background='var(--surface)'"
+                onmouseout="this.style.background='var(--surface2)'">
+          🔍 Detect
+        </button>
       </div>
-      <span class="badge
-        {% if v == 'visited' %}badge-visited
-        {% elif v == 'inTransit' %}badge-current
-        {% else %}badge-pending{% endif %}">{{ v }}</span>
+      {% endif %}
     </div>
     {% endfor %}
   </div>
+  <script>
+  // Pre-fill saved values from localStorage
+  (function(){
+    var legs = ['nagoya','zeebrugge','malmo','bremerhaven','southampton','gothenburg'];
+    legs.forEach(function(leg){
+      var savedDate = localStorage.getItem('depart_date_{{ od.orderId }}_'+leg);
+      var savedMMSI = localStorage.getItem('vessel_mmsi_{{ od.orderId }}_'+leg);
+      var di = document.getElementById('date-'+leg);
+      var mi = document.getElementById('mmsi-'+leg);
+      if(di && savedDate) di.value = savedDate;
+      if(mi && savedMMSI) mi.value = savedMMSI;
+    });
+    // Also pre-fill legacy MMSI for nagoya
+    var legacyMMSI = localStorage.getItem('vessel_mmsi_{{ od.orderId }}');
+    if(legacyMMSI) {
+      var mi = document.getElementById('mmsi-nagoya');
+      if(mi && !mi.value) mi.value = legacyMMSI;
+    }
+    // Pre-fill nagoya date from known leftTheFactory date
+    // Note: this is the login date, NOT the real departure — user should correct it
+    var lfDate = '{{ order._step_dates.leftTheFactory.current if order._step_dates and order._step_dates.leftTheFactory else "" }}';
+    var di = document.getElementById('date-nagoya');
+    if(di && !di.value) {
+      if(lfDate) {
+        // Suggest the day before leftTheFactory as likely departure
+        var d = new Date(lfDate);
+        d.setDate(d.getDate() - 2);
+        di.value = d.toISOString().slice(0,10);
+        di.title = 'Auto-estimated: 2 days before first login at leftTheFactory ('+lfDate+'). Correct if needed.';
+        di.style.borderColor = 'rgba(229,0,26,0.4)'; // subtle red hint that it's estimated
+      }
+    }
+  })();
+
+  function detectLeg(leg, orderHash, orderId) {
+    var date = (document.getElementById('date-'+leg)||{}).value||'';
+    var mmsi = (document.getElementById('mmsi-'+leg)||{}).value||'';
+    if(!date && !mmsi) { alert('Enter a departure date or MMSI to detect the vessel.'); return; }
+    // Save to localStorage
+    if(date) localStorage.setItem('depart_date_'+orderId+'_'+leg, date);
+    if(mmsi) localStorage.setItem('vessel_mmsi_'+orderId+'_'+leg, mmsi);
+    // If MMSI provided directly, use vessel API
+    if(mmsi) {
+      localStorage.setItem('vessel_mmsi_'+orderId, mmsi); // legacy key
+      fetch('/api/vessel/'+mmsi).then(r=>r.json()).then(d=>{
+        if(d.lat) { alert('Tracking '+( d.name||mmsi)+' at '+d.lat+', '+d.lon); location.reload(); }
+        else alert('No position data for MMSI '+mmsi);
+      });
+      return;
+    }
+    // Use date-based detection
+    var url = '/api/vessel-detect/'+orderHash+'?depart_date='+date+'&leg='+leg;
+    fetch(url).then(r=>r.json()).then(d=>{
+      if(d.mmsi||d.lat) {
+        alert('✅ Vessel: '+(d.name||d.mmsi)+'\nPosition: '+d.lat+', '+d.lon+'\nSource: '+(d.source||'cache'));
+        location.reload();
+      } else {
+        alert('❌ No Toyota carrier found for '+leg+' around '+date+'.\nTry adjusting the date by ±1-2 days.');
+      }
+    }).catch(function(){ alert('Detection failed. Try again.'); });
+  }
+  </script>
 
   <script>
   (function(){
@@ -1348,8 +1447,9 @@ def api_vessel(mmsi):
 def api_vessel_detect(order_hash):
     db = get_db()
 
-    # Allow manual departure date override via query param
+    # Allow manual departure date and leg override via query params
     depart_date_override = request.args.get('depart_date')
+    leg_override = request.args.get('leg', 'nagoya')
 
     # Check cache first — only re-detect if >6 hours old (skip cache if override provided)
     if not depart_date_override:
@@ -1388,7 +1488,7 @@ def api_vessel_detect(order_hash):
             return jsonify(error="no leftTheFactory date"), 404
         left_factory_date = row["date_entered"]
 
-    vessel = detect_vessel(left_factory_date)
+    vessel = detect_vessel(left_factory_date, leg=leg_override)
     if not vessel:
         return jsonify(error="no vessel detected"), 404
 
