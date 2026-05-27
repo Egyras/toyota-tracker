@@ -452,11 +452,26 @@ def get_stats_data():
             'created_on':  r['created_on'],
             'step_statuses': step_statuses,
         })
+    # Login frequency per order
+    login_freq = db.execute("""
+        SELECT order_hash, dest_country, model, status,
+               COUNT(*) as logins,
+               MIN(ts) as first_login,
+               MAX(ts) as last_login,
+               CAST((julianday(MAX(ts)) - julianday(MIN(ts))) AS INTEGER) as days_tracked
+        FROM checks
+        WHERE order_hash IS NOT NULL AND model IS NOT NULL
+        GROUP BY order_hash
+        ORDER BY logins DESC
+        LIMIT 20
+    """).fetchall()
+
     return dict(total=total, by_model=by_model, by_status=by_status,
                 by_country=by_country, delayed=delayed, damaged=damaged,
                 recent=recent, step_avgs=step_avgs, step_current=step_current,
                 countries=countries, order_dates=order_dates,
-                order_journeys=order_journeys, order_to_build=order_to_build)
+                order_journeys=order_journeys, order_to_build=order_to_build,
+                login_freq=login_freq)
 
 # ── Templates ─────────────────────────────────────────────────────────────────
 
@@ -772,8 +787,30 @@ TRACKER_PAGE = BASE + """
           <span class="badge badge-{{ s }}" style="margin-top:5px;">{{ s }}</span>
           {% if step_name in step_dates %}
             {% for event, date in step_dates[step_name].items() %}
-            <div style="font-size:11px;color:var(--red);margin-top:3px;">{{ event }}: {{ date }}</div>
+            {% set days_gap = order._days_tracked // [order._logins - 1, 1] | max if order._logins > 1 else 99 %}
+            {% if days_gap <= 1 %}
+              {% set reliability = '✅' %}
+              {% set rel_title = 'High accuracy — logged in daily' %}
+              {% set rel_color = 'var(--green)' %}
+            {% elif days_gap <= 3 %}
+              {% set reliability = '🟡' %}
+              {% set rel_title = 'Moderate accuracy — checked every ' ~ days_gap ~ ' days' %}
+              {% set rel_color = '#e3b341' %}
+            {% else %}
+              {% set reliability = '⚠️' %}
+              {% set rel_title = 'Low accuracy — checked infrequently, date may be off by days' %}
+              {% set rel_color = 'var(--muted)' %}
+            {% endif %}
+            <div style="font-size:11px;color:var(--red);margin-top:3px;display:flex;align-items:center;gap:4px;">
+              {{ event }}: {{ date }}
+              <span title="{{ rel_title }}" style="cursor:help;font-size:10px;">{{ reliability }}</span>
+            </div>
             {% endfor %}
+            {% if order._logins == 1 %}
+            <div style="font-size:10px;color:var(--muted);margin-top:2px;">
+              ⚠️ First login — date shows when you logged in, not when step happened
+            </div>
+            {% endif %}
           {% endif %}
         </div>
       </div>
@@ -1334,7 +1371,23 @@ def index():
                 details['_step_dates'] = step_dates.get("steps", {})
                 details['_created_on'] = _order_dates.get(oid, "")
                 import hashlib
-                details['_order_hash'] = hashlib.sha256(oid.encode()).hexdigest()[:16] if oid else ""
+                order_hash = hashlib.sha256(oid.encode()).hexdigest()[:16] if oid else ""
+                details['_order_hash'] = order_hash
+                # Login frequency for date reliability disclaimer
+                if order_hash:
+                    freq = get_db().execute("""
+                        SELECT COUNT(*) logins,
+                               CAST((julianday(MAX(ts)) - julianday(MIN(ts))) AS INTEGER) days_tracked,
+                               MIN(ts) first_login
+                        FROM checks WHERE order_hash=?
+                    """, (order_hash,)).fetchone()
+                    details['_logins']       = freq['logins'] if freq else 1
+                    details['_days_tracked'] = freq['days_tracked'] if freq else 0
+                    details['_first_login']  = (freq['first_login'] or '')[:10] if freq else ''
+                else:
+                    details['_logins']       = 1
+                    details['_days_tracked'] = 0
+                    details['_first_login']  = ''
                 orders.append(details)
 
         except Exception as e:
