@@ -5,32 +5,33 @@ const D=process.argv[2];   // leftTheFactory date OR visited date for intermedia
 const MMSI=process.argv[3]||"";
 const LEG=process.argv[4]||"nagoya"; // which leg to detect: nagoya|zeebrugge|malmo
 
-// MyShipTracking port IDs
+// MyShipTracking port IDs — complete Toyota Europe network
 var PORT_IDS = {
-  // Leg 1: Japan departure ports
+  // Japan loading ports
   "nagoya":       4715,
   "yokkaichi":    4716,
   "hiroshima":    4717,
-  // Leg 2: European hubs (deep-sea arrival)
-  "zeebrugge":    187,
-  "bremerhaven":  107,
-  "antwerp":      48,
-  "southampton":  390,   // UK direct arrival
-  "portbury":     2403,  // UK direct arrival (Bristol)
-  "livorno":      275,   // Italy direct arrival (alternates with Sagunto)
-  "sagunto":      362,   // Spain/Italy/Portugal arrival
-  // Leg 3: Nordic/Baltic distribution
-  "malmo":        286,
-  "gothenburg":   380,
-  "paldiski":     5661,
+  // Europe main hubs (deep-sea vessel arrives here)
+  "zeebrugge":    187,    // Belgium — main hub for Nordic/Baltic/France
+  "bremerhaven":  107,    // Germany
+  "antwerp":      48,     // Belgium
+  "southampton":  390,    // UK direct
+  "portbury":     2403,   // UK direct (Bristol)
+  "livorno":      275,    // Italy direct (alternates with Sagunto)
+  "sagunto":      362,    // Spain/Italy/France via Sagunto
+  // Nordic/Baltic distribution feeders
+  "malmo":        286,    // Sweden → Paldiski feeder
+  "gothenburg":   380,    // Sweden
+  "paldiski":     5661,   // Estonia → Baltic states truck
+  "drammen":      5130,   // Norway — 70% of all Norwegian car imports
   // Other
-  "vejle":        2593,
+  "vejle":        2593,   // Denmark
 };
 
 // Toyota Europe carriers by leg
-var CARRIERS_LEG1 = ["HIGHWAY","LEADER","ACE","TOREADOR","MORNING"]; // Japan→Europe
-var CARRIERS_LEG2 = ["HIGHWAY","LEADER","ACE","MORNING","CELTIC","SIEM","HOEGH","VIKING","ANIARA"]; // Zeebrugge→Nordic
-var CARRIERS_LEG3 = ["LEADER","ACE","MORNING","SIEM","NORDANA","CELTIC"]; // Malmo→Paldiski
+var CARRIERS_LEG1 = ["HIGHWAY","LEADER","ACE","TOREADOR","MORNING"]; // Japan→Europe deep-sea
+var CARRIERS_LEG2 = ["HIGHWAY","LEADER","ACE","MORNING","CELTIC","SIEM","HOEGH","VIKING","ANIARA"]; // Feeder
+var CARRIERS_LEG3 = ["LEADER","ACE","MORNING","SIEM","NORDANA","CELTIC","HIGHWAY"]; // Baltic feeder
 
 var TOYOTA_CARRIERS={
   "431262000":"Hamburg Highway",
@@ -48,19 +49,22 @@ var TOYOTA_CARRIERS={
   "636020245":"Spica Leader",
 };
 
-// Map Toyota delivery location codes to port leg + ID
-// Italy alternates between Livorno and Sagunto (deep-sea direct, not via Zeebrugge)
-// UK goes direct to Southampton or Portbury (not via Zeebrugge)
-var LOCATION_TO_PORT = {
-  "SU.TJ.1":  {leg:"nagoya",       pid:4715},  // Toyota City → vessel (all routes)
-  "HB.ZB.1":  {leg:"zeebrugge",    pid:187},   // Zeebrugge → feeder (Nordic/France/Spain)
-  "HB.MA.1":  {leg:"malmo",        pid:286},   // Malmö → Paldiski feeder
-  "HB.LI.1":  {leg:"livorno",      pid:275},   // Livorno → Italy distribution
-  "HB.SA.1":  {leg:"sagunto",      pid:362},   // Sagunto → Spain/Italy/Portugal
-  "HB.SO.1":  {leg:"southampton",  pid:390},   // Southampton → UK direct
-  "HB.PO.1":  {leg:"portbury",     pid:2403},  // Portbury → UK direct
-  "HB.GO.1":  {leg:"gothenburg",   pid:380},   // Gothenburg hub
-  "HB.BR.1":  {leg:"bremerhaven",  pid:107},   // Bremerhaven hub
+// Map delivery location names to detection leg
+// Based on actual Toyota API location names observed in DB
+var LOCATION_NAME_TO_LEG = {
+  "toyota city":          "nagoya",
+  "zeebrugge":            "zeebrugge",
+  "malmo":                "malmo",
+  "malmö":                "malmo",
+  "paldiski":             "paldiski",
+  "bristol":              "portbury",
+  "southampton":          "southampton",
+  "livorno":              "livorno",
+  "puerto de sagunto":    "sagunto",
+  "sagunto":              "sagunto",
+  "drammen":              "drammen",
+  "gothenburg":           "gothenburg",
+  "göteborg":             "gothenburg",
 };
 
 function getShipFinderPosition(mmsi) {
