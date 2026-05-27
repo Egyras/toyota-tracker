@@ -799,26 +799,51 @@ TRACKER_PAGE = BASE + """
       </div>
     </div>
 
-    <!-- Manual MMSI override -->
+    <!-- Manual vessel override -->
     <div style="margin-bottom:1.25rem;">
       <details>
         <summary style="font-size:11px;color:var(--muted);cursor:pointer;
                         text-transform:uppercase;letter-spacing:.05em;">
-          🔧 Set vessel MMSI manually
+          🔧 Vessel tracking options
         </summary>
-        <div style="margin-top:.6rem;display:flex;gap:.5rem;">
-          <input id="mmsi-input" type="text" placeholder="e.g. 431262000"
-                 style="flex:1;background:var(--surface2);border:1px solid var(--border);
-                        color:var(--text);padding:7px 10px;border-radius:6px;
-                        font-size:13px;font-family:'Inter',sans-serif;outline:none;">
-          <button onclick="saveMMSI('{{ od.orderId }}')"
-                  style="background:var(--red);color:#fff;border:none;padding:7px 14px;
-                         border-radius:6px;font-size:13px;cursor:pointer;">Track</button>
-        </div>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px;">
-          Find vessel on
-          <a href="https://www.myshiptracking.com" target="_blank">MyShipTracking</a> or
-          <a href="https://www.marinetraffic.com" target="_blank">MarineTraffic</a>
+        <div style="margin-top:.75rem;display:flex;flex-direction:column;gap:.6rem;">
+
+          <!-- Option 1: Override departure date for better detection -->
+          <div>
+            <div style="font-size:11px;color:var(--muted);margin-bottom:4px;">
+              📅 When did Toyota notify you the car left the factory?
+              <span style="color:#3d444d;">(improves vessel detection accuracy)</span>
+            </div>
+            <div style="display:flex;gap:.5rem;">
+              <input id="depart-date-input" type="date"
+                     value="{{ order._step_dates.leftTheFactory.current if order._step_dates and order._step_dates.leftTheFactory else '' }}"
+                     style="flex:1;background:var(--surface2);border:1px solid var(--border);
+                            color:var(--text);padding:7px 10px;border-radius:6px;
+                            font-size:13px;font-family:'Inter',sans-serif;outline:none;">
+              <button onclick="saveDepartDate('{{ od.orderId }}','{{ order._order_hash }}')"
+                      style="background:var(--surface2);color:var(--text);border:1px solid var(--border);
+                             padding:7px 14px;border-radius:6px;font-size:13px;cursor:pointer;">
+                Re-detect
+              </button>
+            </div>
+          </div>
+
+          <!-- Option 2: Manual MMSI if you know the vessel -->
+          <div>
+            <div style="font-size:11px;color:var(--muted);margin-bottom:4px;">
+              🚢 Or enter vessel MMSI directly
+              <span style="color:#3d444d;">(find on <a href="https://www.myshiptracking.com" target="_blank" style="color:var(--muted)">MyShipTracking</a>)</span>
+            </div>
+            <div style="display:flex;gap:.5rem;">
+              <input id="mmsi-input" type="text" placeholder="e.g. 431262000"
+                     style="flex:1;background:var(--surface2);border:1px solid var(--border);
+                            color:var(--text);padding:7px 10px;border-radius:6px;
+                            font-size:13px;font-family:'Inter',sans-serif;outline:none;">
+              <button onclick="saveMMSI('{{ od.orderId }}')"
+                      style="background:var(--red);color:#fff;border:none;padding:7px 14px;
+                             border-radius:6px;font-size:13px;cursor:pointer;">Track</button>
+            </div>
+          </div>
         </div>
       </details>
     </div>
@@ -828,12 +853,30 @@ TRACKER_PAGE = BASE + """
       if(!mmsi) return;
       localStorage.setItem('vessel_mmsi_'+orderId, mmsi);
       fetch('/api/vessel/'+mmsi).then(r=>r.json()).then(d=>{
-        if(d.lat) {
-          // reload page to re-render with vessel
-          location.reload();
-        }
+        if(d.lat) location.reload();
       });
     }
+    function saveDepartDate(orderId, orderHash) {
+      var date = document.getElementById('depart-date-input').value.trim();
+      if(!date) return;
+      // Clear any cached vessel and MMSI so detection runs fresh with new date
+      localStorage.removeItem('vessel_mmsi_'+orderId);
+      // Store override date and trigger re-detection
+      fetch('/api/vessel-detect/'+orderHash+'?depart_date='+date)
+        .then(r=>r.json())
+        .then(d=>{
+          if(d.lat || d.mmsi) {
+            alert('Vessel detected: '+(d.name||d.mmsi)+'\nPosition: '+d.lat+', '+d.lon);
+            location.reload();
+          } else {
+            alert('No Toyota carrier found departing around '+date+'. Try a different date.');
+          }
+        })
+        .catch(function(){ alert('Detection failed, try again.'); });
+    }
+    // Pre-fill MMSI if saved
+    var savedMMSI = localStorage.getItem('vessel_mmsi_{{ od.orderId }}');
+    if(savedMMSI) document.getElementById('mmsi-input').value = savedMMSI;
     </script>
 
     {% for d in delivs %}
@@ -1267,39 +1310,47 @@ def api_vessel(mmsi):
 def api_vessel_detect(order_hash):
     db = get_db()
 
-    # Check cache first — only re-detect if >6 hours old
-    cached = db.execute("""
-        SELECT vessel_mmsi, vessel_name, vessel_lat, vessel_lon,
-               vessel_speed, vessel_course, vessel_dest, vessel_updated
-        FROM checks WHERE order_hash=?
-        AND vessel_mmsi IS NOT NULL
-        AND vessel_updated > datetime('now', '-6 hours')
-        LIMIT 1
-    """, (order_hash,)).fetchone()
+    # Allow manual departure date override via query param
+    depart_date_override = request.args.get('depart_date')
 
-    if cached and cached["vessel_lat"]:
-        return jsonify({
-            "mmsi":        cached["vessel_mmsi"],
-            "name":        cached["vessel_name"],
-            "lat":         float(cached["vessel_lat"]),
-            "lon":         float(cached["vessel_lon"]),
-            "speed":       float(cached["vessel_speed"] or 0),
-            "course":      float(cached["vessel_course"] or 0),
-            "destination": cached["vessel_dest"] or "",
-            "cached":      True,
-        })
+    # Check cache first — only re-detect if >6 hours old (skip cache if override provided)
+    if not depart_date_override:
+        cached = db.execute("""
+            SELECT vessel_mmsi, vessel_name, vessel_lat, vessel_lon,
+                   vessel_speed, vessel_course, vessel_dest, vessel_updated
+            FROM checks WHERE order_hash=?
+            AND vessel_mmsi IS NOT NULL
+            AND vessel_updated > datetime('now', '-6 hours')
+            LIMIT 1
+        """, (order_hash,)).fetchone()
 
-    # Get leftTheFactory date for this order
-    row = db.execute("""
-        SELECT sd.date_entered
-        FROM step_durations sd
-        WHERE sd.order_hash=? AND sd.step='leftTheFactory'
-          AND sd.date_entered IS NOT NULL
-    """, (order_hash,)).fetchone()
-    if not row:
-        return jsonify(error="no leftTheFactory date"), 404
+        if cached and cached["vessel_lat"]:
+            return jsonify({
+                "mmsi":        cached["vessel_mmsi"],
+                "name":        cached["vessel_name"],
+                "lat":         float(cached["vessel_lat"]),
+                "lon":         float(cached["vessel_lon"]),
+                "speed":       float(cached["vessel_speed"] or 0),
+                "course":      float(cached["vessel_course"] or 0),
+                "destination": cached["vessel_dest"] or "",
+                "cached":      True,
+            })
 
-    vessel = detect_vessel(row["date_entered"])
+    # Use override date or look up from DB
+    if depart_date_override:
+        left_factory_date = depart_date_override
+    else:
+        row = db.execute("""
+            SELECT sd.date_entered
+            FROM step_durations sd
+            WHERE sd.order_hash=? AND sd.step='leftTheFactory'
+              AND sd.date_entered IS NOT NULL
+        """, (order_hash,)).fetchone()
+        if not row:
+            return jsonify(error="no leftTheFactory date"), 404
+        left_factory_date = row["date_entered"]
+
+    vessel = detect_vessel(left_factory_date)
     if not vessel:
         return jsonify(error="no vessel detected"), 404
 
