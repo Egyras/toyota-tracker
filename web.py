@@ -1048,16 +1048,22 @@ TRACKER_PAGE = BASE + """
     });
     map.fitBounds(latlngs,{padding:[30,30]});
 
-    // Try to auto-detect and show vessel position
-    {% set has_left = delivs | selectattr('isVisited', 'in', ['inTransit','visited']) | list | length > 0 %}
-    {% if has_left %}
+    // Show vessel if order is at leftTheFactory or beyond
+    {% set show_vessel = order.currentStatus.currentStatus in ['LeftTheFactory','InTransit','ArrivedAtRetailer'] %}
+    {% if show_vessel or (delivs | selectattr('isVisited', 'in', ['inTransit','visited']) | list | length > 0) %}
     var vesselMarker = null;
     function loadVessel(mmsi, name, lat, lng, speed, course, dest) {
       if (vesselMarker) map.removeLayer(vesselMarker);
       var icon = L.divIcon({
         className:'',
-        html:'<div style="font-size:22px;transform:rotate('+course+'deg);filter:drop-shadow(0 0 4px #fff);">🚢</div>',
-        iconSize:[28,28],iconAnchor:[14,14]
+        html:'<div style="position:relative;text-align:center;">' +
+             '<div style="font-size:24px;filter:drop-shadow(0 0 6px rgba(229,0,26,0.8));">🚢</div>' +
+             '<div style="position:absolute;top:26px;left:50%;transform:translateX(-50%);' +
+             'background:rgba(0,0,0,0.75);color:#fff;font-size:9px;font-weight:600;' +
+             'padding:1px 5px;border-radius:3px;white-space:nowrap;letter-spacing:.03em;' +
+             'border:1px solid rgba(229,0,26,0.5);">'+name+'</div>' +
+             '</div>',
+        iconSize:[80,40],iconAnchor:[40,12]
       });
       vesselMarker = L.marker([lat,lng],{icon:icon,zIndexOffset:1000}).addTo(map)
         .bindPopup(
@@ -1066,6 +1072,10 @@ TRACKER_PAGE = BASE + """
           (dest?'Dest: '+dest+'<br>':'')+
           '<small style="color:#aaa">MMSI: '+mmsi+'</small>'
         );
+      // Extend map bounds to include vessel
+      var bounds = L.latLngBounds(latlngs);
+      bounds.extend([lat, lng]);
+      map.fitBounds(bounds, {padding:[30,30]});
       // Add pulsing circle around vessel
       L.circle([lat,lng],{
         radius:200000,color:'#e5001a',fillColor:'#e5001a',
@@ -1089,10 +1099,25 @@ TRACKER_PAGE = BASE + """
         .then(r=>r.json())
         .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination); });
     } else {
-      // Auto-detect based on leftTheFactory date
       var hash = "{{ order._order_hash if order._order_hash else '' }}";
       if(hash){
-        fetch('/api/vessel-detect/'+hash)
+        // Auto-select leg based on which stop is currently inTransit
+        var leg = 'nagoya';
+        {% for d in delivs %}
+        {% if d.isVisited == 'inTransit' %}
+          {% set loc = d.locationName | lower %}
+          {% if 'zeebrugge' in loc %}leg = 'zeebrugge';
+          {% elif 'malmo' in loc or 'malmö' in loc %}leg = 'malmo';
+          {% elif 'sagunto' in loc %}leg = 'sagunto';
+          {% elif 'livorno' in loc %}leg = 'livorno';
+          {% elif 'bristol' in loc or 'portbury' in loc %}leg = 'portbury';
+          {% elif 'southampton' in loc %}leg = 'southampton';
+          {% elif 'drammen' in loc %}leg = 'drammen';
+          {% elif 'piraeus' in loc %}leg = 'piraeus';
+          {% endif %}
+        {% endif %}
+        {% endfor %}
+        fetch('/api/vessel-detect/'+hash+'?leg='+leg)
           .then(r=>r.json())
           .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination); })
           .catch(()=>{});
