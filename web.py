@@ -886,6 +886,35 @@ TRACKER_PAGE = BASE + """
 
     <!-- Vessel auto-detection runs automatically, inline controls below for manual override -->
 
+    <!-- MST history limit warning — shown when leftTheFactory date is >25 days ago -->
+    {% set lf_date = order._step_dates.leftTheFactory.current if order._step_dates and order._step_dates.leftTheFactory else '' %}
+    {% if lf_date %}
+    <div id="mst-limit-warning" style="display:none;margin-bottom:1.25rem;padding:10px 12px;
+         background:rgba(227,179,65,0.08);border:1px solid rgba(227,179,65,0.3);
+         border-radius:8px;font-size:12px;color:#e3b341;line-height:1.6;">
+      <strong>⚠️ Vessel detection may not work</strong><br>
+      <span style="color:var(--muted);">
+        Port departure records are only available for the last ~20 days.
+        Your car left the factory <span id="days-since-factory"></span> days ago —
+        the Nagoya departure data may no longer be accessible.<br>
+        <strong style="color:var(--text);">To track your vessel:</strong>
+        enter the departure date from your Toyota email below and click 🔍 Detect,
+        or enter the MMSI directly if you already found the ship on
+        <a href="https://www.myshiptracking.com" target="_blank" style="color:#e3b341;">MyShipTracking</a>.
+      </span>
+    </div>
+    <script>
+    (function(){
+      var lf = '{{ lf_date }}';
+      if(!lf) return;
+      var days = Math.floor((Date.now() - new Date(lf).getTime()) / 86400000);
+      document.getElementById('days-since-factory').textContent = days;
+      if(days > 20) {
+        document.getElementById('mst-limit-warning').style.display = 'block';
+      }
+    })();
+    </script>
+    {% endif %}
 
     {% for d in delivs %}
     {% set v = d.isVisited %}
@@ -1048,9 +1077,9 @@ TRACKER_PAGE = BASE + """
     });
     map.fitBounds(latlngs,{padding:[30,30]});
 
-    // Show vessel if order is at leftTheFactory or beyond
-    {% set show_vessel = order.currentStatus.currentStatus in ['LeftTheFactory','InTransit','ArrivedAtRetailer'] %}
-    {% if show_vessel or (delivs | selectattr('isVisited', 'in', ['inTransit','visited']) | list | length > 0) %}
+    // Show vessel if order is at leftTheFactory or beyond, OR if vessel already detected
+    {% set show_vessel = order.currentStatus.currentStatus in ['LeftTheFactory','InTransit','ArrivedAtRetailer'] or order._vessel_mmsi %}
+    {% if show_vessel %}
     var vesselMarker = null;
     function loadVessel(mmsi, name, lat, lng, speed, course, dest) {
       if (vesselMarker) map.removeLayer(vesselMarker);
@@ -1444,10 +1473,19 @@ def index():
                     details['_logins']       = freq['logins'] if freq else 1
                     details['_days_tracked'] = freq['days_tracked'] if freq else 0
                     details['_first_login']  = (freq['first_login'] or '')[:10] if freq else ''
+                    # Check if vessel already known in DB
+                    v = get_db().execute("""
+                        SELECT vessel_mmsi, vessel_name FROM checks
+                        WHERE order_hash=? AND vessel_mmsi IS NOT NULL LIMIT 1
+                    """, (order_hash,)).fetchone()
+                    details['_vessel_mmsi'] = v['vessel_mmsi'] if v else ''
+                    details['_vessel_name'] = v['vessel_name'] if v else ''
                 else:
                     details['_logins']       = 1
                     details['_days_tracked'] = 0
                     details['_first_login']  = ''
+                    details['_vessel_mmsi']  = ''
+                    details['_vessel_name']  = ''
                 orders.append(details)
 
         except Exception as e:
