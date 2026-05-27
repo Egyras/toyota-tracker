@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Toyota Order Tracker — Flask web page wrapper with anonymized stats collection."""
+"""Toyota Order Tracker — Flask web wrapper with anonymized stats collection."""
 import os, sys, json, sqlite3, subprocess
 from datetime import datetime, timedelta
 from flask import Flask, render_template_string, request, g, jsonify
@@ -875,37 +875,49 @@ TRACKER_PAGE = BASE + """
     {% endfor %}
   </div>
   <script>
-  // Pre-fill saved values from localStorage
+  // Pre-fill saved values — from DB (vessel_overrides) first, then localStorage fallback
   (function(){
-    var legs = ['nagoya','zeebrugge','malmo','bremerhaven','southampton','gothenburg'];
-    legs.forEach(function(leg){
-      var savedDate = localStorage.getItem('depart_date_{{ od.orderId }}_'+leg);
-      var savedMMSI = localStorage.getItem('vessel_mmsi_{{ od.orderId }}_'+leg);
+    var orderId   = '{{ od.orderId }}';
+    var orderHash = '{{ order._order_hash }}';
+    var legs = ['nagoya','zeebrugge','malmo','bremerhaven','southampton','gothenburg','sagunto','livorno','piraeus','drammen'];
+
+    function applyValues(leg, date, mmsi) {
       var di = document.getElementById('date-'+leg);
       var mi = document.getElementById('mmsi-'+leg);
-      if(di && savedDate) di.value = savedDate;
-      if(mi && savedMMSI) mi.value = savedMMSI;
-    });
-    // Also pre-fill legacy MMSI for nagoya
-    var legacyMMSI = localStorage.getItem('vessel_mmsi_{{ od.orderId }}');
-    if(legacyMMSI) {
-      var mi = document.getElementById('mmsi-nagoya');
-      if(mi && !mi.value) mi.value = legacyMMSI;
+      if(di && date && !di.value) { di.value = date; di.style.borderColor='rgba(229,0,26,0.3)'; }
+      if(mi && mmsi && !mi.value) mi.value = mmsi;
     }
-    // Pre-fill nagoya date from known leftTheFactory date
-    // Note: this is the login date, NOT the real departure — user should correct it
-    var lfDate = '{{ order._step_dates.leftTheFactory.current if order._step_dates and order._step_dates.leftTheFactory else "" }}';
-    var di = document.getElementById('date-nagoya');
-    if(di && !di.value) {
-      if(lfDate) {
-        // Suggest the day before leftTheFactory as likely departure
-        var d = new Date(lfDate);
-        d.setDate(d.getDate() - 2);
-        di.value = d.toISOString().slice(0,10);
-        di.title = 'Auto-estimated: 2 days before first login at leftTheFactory ('+lfDate+'). Correct if needed.';
-        di.style.borderColor = 'rgba(229,0,26,0.4)'; // subtle red hint that it's estimated
-      }
-    }
+
+    // Step 1: Load from DB (works across devices)
+    fetch('/api/vessel-overrides/'+orderHash)
+      .then(function(r){ return r.json(); })
+      .then(function(data){
+        legs.forEach(function(leg){
+          var d = data[leg];
+          if(d) applyValues(leg, d.depart_date, d.mmsi||d.detected_mmsi);
+        });
+      })
+      .catch(function(){})
+      .finally(function(){
+        // Step 2: localStorage fills any remaining gaps
+        legs.forEach(function(leg){
+          var savedDate = localStorage.getItem('depart_date_'+orderId+'_'+leg);
+          var savedMMSI = localStorage.getItem('vessel_mmsi_'+orderId+'_'+leg);
+          applyValues(leg, savedDate, savedMMSI);
+        });
+        // Step 3: Estimate nagoya date if still empty
+        var di = document.getElementById('date-nagoya');
+        if(di && !di.value) {
+          var lfDate = '{{ order._step_dates.leftTheFactory.current if order._step_dates and order._step_dates.leftTheFactory else "" }}';
+          if(lfDate){
+            var d = new Date(lfDate);
+            d.setDate(d.getDate() - 2);
+            di.value = d.toISOString().slice(0,10);
+            di.style.borderColor = 'rgba(229,0,26,0.4)';
+            di.title = 'Estimated: 2 days before first login at leftTheFactory ('+lfDate+'). Correct if you know the real date.';
+          }
+        }
+      });
   })();
 
   function detectLeg(leg, orderHash, orderId) {
@@ -1452,6 +1464,25 @@ def api_vessel_detect(order_hash):
     db.commit()
 
     return jsonify({k: v for k, v in vessel.items() if not k.startswith("_")})
+
+@app.route("/api/vessel-overrides/<order_hash>")
+def api_vessel_overrides(order_hash):
+    db = get_db()
+    rows = db.execute("""
+        SELECT leg, depart_date, mmsi, detected_mmsi, detected_name, detected_at, source
+        FROM vessel_overrides WHERE order_hash=?
+    """, (order_hash,)).fetchall()
+    result = {}
+    for r in rows:
+        result[r["leg"]] = {
+            "depart_date":   r["depart_date"],
+            "mmsi":          r["mmsi"],
+            "detected_mmsi": r["detected_mmsi"],
+            "detected_name": r["detected_name"],
+            "detected_at":   r["detected_at"],
+            "source":        r["source"],
+        }
+    return jsonify(result)
 
 @app.route("/stats/count")
 def stats_count():
