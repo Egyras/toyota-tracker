@@ -242,9 +242,15 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True, created_o
 
         if today_only and order_hash:
             today = datetime.utcnow().strftime("%Y-%m-%d")
-            if db.execute("SELECT 1 FROM checks WHERE order_hash=? AND ts LIKE ?",
-                          (order_hash, f"{today}%")).fetchone():
-                # Still update created_on if we now have it and it was missing
+            existing = db.execute("SELECT rowid, status FROM checks WHERE order_hash=? AND ts LIKE ?",
+                          (order_hash, f"{today}%")).fetchone()
+            if existing:
+                # Update status if it changed today
+                current_status = order.get("currentStatus", {}).get("currentStatus", "")
+                if current_status and current_status != existing["status"]:
+                    db.execute("UPDATE checks SET status=?, ts=? WHERE rowid=?",
+                               (current_status, datetime.utcnow().isoformat(), existing["rowid"]))
+                # Still update created_on if missing
                 if created_on:
                     db.execute(
                         "UPDATE checks SET created_on=? WHERE order_hash=? AND created_on IS NULL",
