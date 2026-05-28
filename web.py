@@ -732,27 +732,107 @@ TRACKER_PAGE = BASE + """
     </div>
 
     <div class="card">
-      <form method="POST">
+      <form method="POST" id="login-form">
         <div class="form-group">
           <label>Email address</label>
-          <input type="email" name="username" placeholder="your@email.com" required autofocus>
+          <input type="email" name="username" id="inp-email" placeholder="your@email.com" required autofocus>
         </div>
         <div class="form-group">
           <label>Password</label>
-          <input type="password" name="password" required>
+          <input type="password" name="password" id="inp-password" required>
         </div>
         <button type="submit" class="btn">Check my order →</button>
+
+        <div style="margin-top:1rem;display:flex;align-items:center;gap:10px;">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;
+                        font-size:12px;color:var(--muted);">
+            <input type="checkbox" id="auto-refresh-toggle"
+                   style="width:15px;height:15px;accent-color:var(--red);cursor:pointer;">
+            Auto-refresh every 2 hours while tab is open
+          </label>
+        </div>
       </form>
+
+      <script>
+      // Restore saved email
+      var savedEmail = sessionStorage.getItem('tr_email');
+      if(savedEmail) document.getElementById('inp-email').value = savedEmail;
+
+      // Restore auto-refresh preference
+      var autoRefresh = localStorage.getItem('tr_auto_refresh') === '1';
+      document.getElementById('auto-refresh-toggle').checked = autoRefresh;
+      document.getElementById('auto-refresh-toggle').addEventListener('change', function(){
+        localStorage.setItem('tr_auto_refresh', this.checked ? '1' : '0');
+      });
+
+      // On submit: save credentials to sessionStorage for auto-refresh
+      document.getElementById('login-form').addEventListener('submit', function(){
+        var email = document.getElementById('inp-email').value;
+        var pass  = document.getElementById('inp-password').value;
+        if(email) sessionStorage.setItem('tr_email', email);
+        if(pass)  sessionStorage.setItem('tr_pass', pass);
+      });
+
+      // Auto-refresh logic: if credentials saved and toggle enabled, resubmit every 2h
+      (function(){
+        var email = sessionStorage.getItem('tr_email');
+        var pass  = sessionStorage.getItem('tr_pass');
+        if(!email || !pass) return;
+        if(localStorage.getItem('tr_auto_refresh') !== '1') return;
+
+        var INTERVAL = 2 * 60 * 60 * 1000; // 2 hours
+        var nextCheck = parseInt(sessionStorage.getItem('tr_next_check') || '0');
+        var now = Date.now();
+        var remaining = nextCheck - now;
+
+        function scheduleNext() {
+          var next = Date.now() + INTERVAL;
+          sessionStorage.setItem('tr_next_check', next);
+          setTimeout(doRefresh, INTERVAL);
+          updateCountdown(INTERVAL);
+        }
+
+        function doRefresh() {
+          document.getElementById('inp-email').value = email;
+          document.getElementById('inp-password').value = pass;
+          document.getElementById('login-form').submit();
+        }
+
+        function updateCountdown(ms) {
+          var el = document.getElementById('next-check-time');
+          if(!el) return;
+          var mins = Math.round(ms / 60000);
+          var h = Math.floor(mins/60), m = mins % 60;
+          el.textContent = 'Next auto-check in ' + (h>0?h+'h ':'') + m + 'min';
+        }
+
+        if(remaining > 5000) {
+          // Resume countdown
+          setTimeout(doRefresh, remaining);
+          updateCountdown(remaining);
+          setInterval(function(){
+            var r = parseInt(sessionStorage.getItem('tr_next_check')||'0') - Date.now();
+            if(r > 0) updateCountdown(r);
+          }, 30000);
+        } else {
+          // Overdue — check now
+          doRefresh();
+        }
+      })();
+      </script>
     </div>
 
     <div class="privacy">
       <div class="privacy-title">🔒 How your credentials are handled</div>
       <p>Your credentials go directly to Toyota's API at <code>ssoms.toyota-europe.com</code>
-         — never written to disk, never logged, never stored.</p>
+         — never written to disk, never logged, never stored on our server.</p>
       <p>Only anonymized stats are saved: model, step, country, delay flag.
          No name, email, or order ID is stored. See
          <a href="https://github.com/Egyras/toyota-tracker/blob/main/web.py" target="_blank">
          save_stats()</a> in the source code.</p>
+      <p>If you enable <strong>auto-refresh</strong>, your email and password are saved in your
+         browser's <code>sessionStorage</code> — local to this tab only, never sent to our server,
+         and automatically cleared when you close the tab.</p>
     </div>
   </div>
 
@@ -1269,7 +1349,45 @@ TRACKER_PAGE = BASE + """
   <p style="margin-top:1rem;font-size:13px;color:var(--muted);">
     <a href="/">← Check again</a> &nbsp;·&nbsp;
     <a href="/stats">📊 Global statistics</a>
+    &nbsp;·&nbsp;
+    <span id="next-check-time" style="color:var(--muted);font-size:12px;"></span>
   </p>
+  <script>
+  // Check if status changed since last auto-refresh
+  (function(){
+    var lastStatus = sessionStorage.getItem('tr_last_status');
+    var currentStatus = "{{ orders[0].currentStatus.currentStatus if orders else '' }}";
+    if(lastStatus && currentStatus && lastStatus !== currentStatus){
+      var banner = document.createElement('div');
+      banner.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);' +
+        'background:#1f6feb;color:#fff;padding:10px 20px;border-radius:8px;font-size:13px;' +
+        'font-weight:500;z-index:9999;box-shadow:0 4px 12px rgba(0,0,0,.4);';
+      banner.textContent = '🔔 Status updated: ' + lastStatus + ' → ' + currentStatus;
+      document.body.appendChild(banner);
+      setTimeout(function(){ banner.style.opacity='0'; banner.style.transition='opacity .5s'; setTimeout(function(){banner.remove();},500); }, 5000);
+    }
+    if(currentStatus) sessionStorage.setItem('tr_last_status', currentStatus);
+  })();
+
+  // Resume auto-refresh countdown on results page too
+  (function(){
+    if(localStorage.getItem('tr_auto_refresh') !== '1') return;
+    var nextCheck = parseInt(sessionStorage.getItem('tr_next_check')||'0');
+    var remaining = nextCheck - Date.now();
+    if(remaining > 0) {
+      function updateCountdown(){
+        var r = parseInt(sessionStorage.getItem('tr_next_check')||'0') - Date.now();
+        var el = document.getElementById('next-check-time');
+        if(!el) return;
+        if(r <= 0){ el.textContent = 'Refreshing...'; return; }
+        var h = Math.floor(r/3600000), m = Math.floor((r%3600000)/60000);
+        el.textContent = '🔄 Auto-check in ' + (h>0?h+'h ':'') + m + 'min';
+      }
+      updateCountdown();
+      setInterval(updateCountdown, 30000);
+    }
+  })();
+  </script>
 {% endif %}
 </div></body></html>
 """
