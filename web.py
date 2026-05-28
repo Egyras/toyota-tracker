@@ -939,6 +939,20 @@ TRACKER_PAGE = BASE + """
 
     <!-- Vessel auto-detection runs automatically, inline controls below for manual override -->
 
+    <!-- Vessel date prompt — shown when login frequency is too low for reliable auto-detection -->
+    <div id="vessel-date-prompt" style="display:none;margin-bottom:1.25rem;padding:10px 14px;
+         background:rgba(229,0,26,0.06);border:1px solid rgba(229,0,26,0.2);
+         border-radius:8px;font-size:12px;line-height:1.6;">
+      <strong style="color:var(--text);">🚢 Vessel detection needs your help</strong><br>
+      <span style="color:var(--muted);">
+        Your login frequency is too low to reliably detect the vessel automatically —
+        the date we have may be off by several days, leading to the wrong ship.<br>
+        <strong style="color:var(--text);">Enter the exact date from your Toyota notification email</strong>
+        in the <strong style="color:var(--text);">Factory departure</strong> field below and click
+        <strong style="color:var(--red);">🔍 Detect</strong> for accurate results.
+      </span>
+    </div>
+
     <!-- MST history limit warning — shown when leftTheFactory date is >25 days ago -->
     {% set lf_date = order._step_dates.leftTheFactory.current if order._step_dates and order._step_dates.leftTheFactory else '' %}
     {% if lf_date %}
@@ -998,31 +1012,45 @@ TRACKER_PAGE = BASE + """
           {% else %}badge-pending{% endif %}">{{ v }}</span>
       </div>
       {% if is_vessel and v in ['inTransit', 'notVisited'] %}
-      <div style="margin:6px 0 2px 44px;display:flex;gap:6px;flex-wrap:wrap;">
-        <input type="date" id="date-{{ leg_key }}"
-               placeholder="Departure date"
-               style="flex:1;min-width:120px;background:var(--bg);border:1px solid var(--border);
-                      color:var(--text);padding:6px 10px;border-radius:6px;
-                      font-size:12px;font-family:'Inter',sans-serif;outline:none;"
-               onfocus="this.style.borderColor='var(--red)'"
-               onblur="this.style.borderColor='var(--border)'"
-               title="Enter the date Toyota notified you the car departed this location">
-        <input type="text" id="mmsi-{{ leg_key }}"
-               placeholder="MMSI (optional)"
-               style="flex:1;min-width:110px;background:var(--bg);border:1px solid var(--border);
-                      color:var(--text);padding:6px 10px;border-radius:6px;
-                      font-size:12px;font-family:'Inter',sans-serif;outline:none;"
-               onfocus="this.style.borderColor='var(--red)'"
-               onblur="this.style.borderColor='var(--border)'"
-               title="Enter vessel MMSI if known">
-        <button onclick="detectLeg('{{ leg_key }}','{{ order._order_hash }}','{{ od.orderId }}')"
-                style="background:var(--surface2);color:var(--text);border:1px solid var(--border);
-                       padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer;
-                       white-space:nowrap;"
-                onmouseover="this.style.background='var(--surface)'"
-                onmouseout="this.style.background='var(--surface2)'">
-          🔍 Detect
-        </button>
+      {% set step_date = order._step_dates.leftTheFactory if leg_key == 'nagoya' else
+                         order._step_dates.get(leg_key, {}) if order._step_dates else {} %}
+      {% set days_gap = (order._days_tracked // [order._logins - 1, 1] | max) if order._logins > 1 else 99 %}
+      {% set date_reliable = order._logins >= 2 and days_gap <= 3 %}
+      <div style="margin:6px 0 2px 44px;">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <input type="date" id="date-{{ leg_key }}"
+                 placeholder="Departure date"
+                 style="flex:1;min-width:120px;background:var(--bg);border:1px solid var(--border);
+                        color:var(--text);padding:6px 10px;border-radius:6px;
+                        font-size:12px;font-family:'Inter',sans-serif;outline:none;"
+                 onfocus="this.style.borderColor='var(--red)'"
+                 onblur="this.style.borderColor='var(--border)'"
+                 title="Enter the date Toyota notified you the car departed this location">
+          <input type="text" id="mmsi-{{ leg_key }}"
+                 placeholder="MMSI (optional)"
+                 style="flex:1;min-width:110px;background:var(--bg);border:1px solid var(--border);
+                        color:var(--text);padding:6px 10px;border-radius:6px;
+                        font-size:12px;font-family:'Inter',sans-serif;outline:none;"
+                 onfocus="this.style.borderColor='var(--red)'"
+                 onblur="this.style.borderColor='var(--border)'"
+                 title="Enter vessel MMSI if known">
+          <button onclick="detectLeg('{{ leg_key }}','{{ order._order_hash }}','{{ od.orderId }}')"
+                  style="background:var(--surface2);color:var(--text);border:1px solid var(--border);
+                         padding:6px 12px;border-radius:6px;font-size:12px;cursor:pointer;
+                         white-space:nowrap;"
+                  onmouseover="this.style.background='var(--surface)'"
+                  onmouseout="this.style.background='var(--surface2)'">
+            🔍 Detect
+          </button>
+        </div>
+        {% if not date_reliable %}
+        <div style="margin-top:5px;font-size:11px;color:var(--muted);
+                    padding:4px 8px;background:rgba(229,0,26,0.06);
+                    border-left:2px solid rgba(229,0,26,0.3);border-radius:0 4px 4px 0;">
+          📧 For accurate detection enter the date from your <strong style="color:var(--text);">Toyota notification email</strong>
+          {% if order._logins == 1 %}— we only have your first login date which may be days off{% endif %}
+        </div>
+        {% endif %}
       </div>
       {% endif %}
     </div>
@@ -1174,16 +1202,18 @@ TRACKER_PAGE = BASE + """
       }
     }
 
-    // First check if user has manually set MMSI in localStorage
+    // Auto-detect vessel — only if date is reliable or vessel already known
     var savedMMSI = localStorage.getItem('vessel_mmsi_{{ od.orderId }}');
-    if(savedMMSI){
-      fetch('/api/vessel/'+savedMMSI)
-        .then(r=>r.json())
-        .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination); });
-    } else {
-      var hash = "{{ order._order_hash if order._order_hash else '' }}";
-      if(hash){
-        // Auto-select leg based on which stop is currently inTransit
+    var hash = "{{ order._order_hash if order._order_hash else '' }}";
+    var hasUserDate = false;
+    var hasKnownVessel = {{ 'true' if order._vessel_mmsi else 'false' }};
+    var loginGap = {{ ((order._days_tracked / [order._logins - 1, 1]|max)|round(1)) if order._logins > 1 else 99 }};
+    var logins = {{ order._logins }};
+
+    // Check if user entered a date in vessel_overrides (reliable)
+    fetch('/api/vessel-overrides/'+hash)
+      .then(r=>r.json())
+      .then(function(overrides){
         var leg = 'nagoya';
         {% for d in delivs %}
         {% if d.isVisited == 'inTransit' %}
@@ -1199,12 +1229,37 @@ TRACKER_PAGE = BASE + """
           {% endif %}
         {% endif %}
         {% endfor %}
-        fetch('/api/vessel-detect/'+hash+'?leg='+leg)
-          .then(r=>r.json())
-          .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination); })
-          .catch(()=>{});
-      }
-    }
+
+        var legOverride = overrides[leg];
+        hasUserDate = !!(legOverride && legOverride.depart_date);
+        var dateReliable = hasUserDate || hasKnownVessel || (logins >= 2 && loginGap <= 3);
+
+        if(savedMMSI){
+          // Manual MMSI set — always use it
+          fetch('/api/vessel/'+savedMMSI)
+            .then(r=>r.json())
+            .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination); });
+        } else if(dateReliable && hash){
+          // Date is reliable — auto-detect
+          fetch('/api/vessel-detect/'+hash+'?leg='+leg)
+            .then(r=>r.json())
+            .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination); })
+            .catch(()=>{});
+        } else if(hash) {
+          // Date unreliable — show prompt instead of wrong vessel
+          var prompt = document.getElementById('vessel-date-prompt');
+          if(prompt) prompt.style.display = 'block';
+        }
+      })
+      .catch(function(){
+        // Fallback — try detection anyway
+        if(hash){
+          fetch('/api/vessel-detect/'+hash)
+            .then(r=>r.json())
+            .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination); })
+            .catch(()=>{});
+        }
+      });
     {% endif %}
   })();
   </script>
