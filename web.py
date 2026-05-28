@@ -680,6 +680,20 @@ a:hover{text-decoration:underline;}
       Statistics
       <span class="nav-pill" id="nav-order-count"></span>
     </a>
+    {% if username %}
+    <div class="nav-divider"></div>
+    <div id="nav-auto-check" style="display:none;align-items:center;gap:6px;
+                                    background:rgba(31,111,235,0.12);
+                                    border:1px solid rgba(31,111,235,0.25);
+                                    border-radius:20px;padding:4px 12px;
+                                    font-size:11px;font-weight:500;color:#58a6ff;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           style="width:12px;height:12px;flex-shrink:0;" aria-hidden="true">
+        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+      </svg>
+      <span id="next-check-label">—</span>
+    </div>
+    {% endif %}
     <div class="nav-divider"></div>
     <a href="https://github.com/Egyras/toyota-tracker" target="_blank" class="nav-link">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -1314,12 +1328,7 @@ TRACKER_PAGE = BASE + """
   {% endif %}
   {% endfor %}
 
-  <p style="margin-top:1rem;font-size:13px;color:var(--muted);">
-    <a href="/">← Check again</a> &nbsp;·&nbsp;
-    <a href="/stats">📊 Global statistics</a>
-    &nbsp;·&nbsp;
-    <span id="next-check-time" style="color:var(--muted);font-size:12px;"></span>
-  </p>
+  <!-- bottom spacer -->
   <script>
   // Check if status changed since last auto-refresh
   (function(){
@@ -1343,37 +1352,35 @@ TRACKER_PAGE = BASE + """
     var INTERVAL = 2 * 60 * 60 * 1000;
     var nextCheck = parseInt(sessionStorage.getItem('tr_next_check')||'0');
     var now = Date.now();
-
-    // If no timer set yet, start one now
     if(!nextCheck || nextCheck <= now){
       nextCheck = now + INTERVAL;
       sessionStorage.setItem('tr_next_check', nextCheck);
     }
+    var container = document.getElementById('nav-auto-check');
+    var label = document.getElementById('next-check-label');
+    if(container) container.style.display = 'flex';
 
     function updateCountdown(){
       var r = parseInt(sessionStorage.getItem('tr_next_check')||'0') - Date.now();
-      var el = document.getElementById('next-check-time');
-      if(!el) return;
+      if(!label) return;
       if(r <= 0){
-        el.textContent = 'Refreshing...';
-        // Auto-submit login form if credentials saved
+        label.textContent = 'Refreshing...';
         var email = sessionStorage.getItem('tr_email');
         var pass  = sessionStorage.getItem('tr_pass');
         if(email && pass){
           var f = document.createElement('form');
-          f.method = 'POST'; f.action = '/';
-          var u = document.createElement('input'); u.name='username'; u.value=email; f.appendChild(u);
-          var p = document.createElement('input'); p.name='password'; p.value=pass; f.appendChild(p);
+          f.method='POST'; f.action='/';
+          var u=document.createElement('input'); u.name='username'; u.value=email; f.appendChild(u);
+          var p=document.createElement('input'); p.name='password'; p.value=pass; f.appendChild(p);
           document.body.appendChild(f);
-          sessionStorage.setItem('tr_next_check', Date.now() + INTERVAL);
+          sessionStorage.setItem('tr_next_check', Date.now()+INTERVAL);
           f.submit();
         }
         return;
       }
-      var h = Math.floor(r/3600000), m = Math.floor((r%3600000)/60000);
-      el.textContent = '🔄 Auto-check in ' + (h>0?h+'h ':'') + m + 'min';
+      var h=Math.floor(r/3600000), m=Math.floor((r%3600000)/60000);
+      label.textContent = (h>0?h+'h ':'') + m + 'min';
     }
-
     updateCountdown();
     setInterval(updateCountdown, 30000);
   })();
