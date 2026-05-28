@@ -70,8 +70,8 @@ def get_vessel_position(mmsi: str) -> dict | None:
     return _fetch_datadocked(mmsi)
 
 
-def _cache_vessel(db, order_hash: str, vessel: dict):
-    """Cache vessel detection result in DB."""
+def _cache_vessel(db, order_hash: str, vessel: dict, leg: str = "nagoya"):
+    """Cache vessel detection result in both checks and vessel_overrides."""
     try:
         db.execute("""
             UPDATE checks SET vessel_mmsi=?, vessel_name=?, vessel_lat=?,
@@ -86,6 +86,17 @@ def _cache_vessel(db, order_hash: str, vessel: dict):
             datetime.utcnow().isoformat(),
             order_hash
         ))
+        # Also keep vessel_overrides in sync
+        if vessel.get("mmsi"):
+            db.execute("""
+                INSERT INTO vessel_overrides
+                    (order_hash, leg, detected_mmsi, detected_name, detected_at, source, created_at)
+                VALUES (?, ?, ?, ?, datetime('now'), 'auto', datetime('now'))
+                ON CONFLICT(order_hash, leg) DO UPDATE SET
+                    detected_mmsi = excluded.detected_mmsi,
+                    detected_name = excluded.detected_name,
+                    detected_at   = excluded.detected_at
+            """, (order_hash, leg, vessel.get("mmsi"), vessel.get("name")))
         db.commit()
     except Exception as e:
         print(f"[vessel cache] {e}", file=sys.stderr)
@@ -1583,12 +1594,7 @@ def api_vessel_detect(order_hash):
                 # Stale — refresh position only
                 pos = get_vessel_position(mmsi)
                 if pos:
-                    _cache_vessel(db, order_hash, pos)
-                    db.execute("""
-                        UPDATE vessel_overrides SET detected_at=datetime('now')
-                        WHERE order_hash=? AND leg=?
-                    """, (order_hash, leg_override))
-                    db.commit()
+                    _cache_vessel(db, order_hash, pos, leg=leg_override)
                     return jsonify({**pos, "cached": False, "leg": leg_override})
 
         # Fallback: check checks table (legacy, no leg info)
@@ -1622,7 +1628,7 @@ def api_vessel_detect(order_hash):
                 else:
                     pos = get_vessel_position(cached["vessel_mmsi"])
                     if pos:
-                        _cache_vessel(db, order_hash, pos)
+                        _cache_vessel(db, order_hash, pos, leg=leg_override)
                         return jsonify({**pos, "cached": False})
                     return jsonify({
                         "mmsi":        cached["vessel_mmsi"],
@@ -1666,7 +1672,7 @@ def api_vessel_detect(order_hash):
     """, (order_hash, leg_override, left_factory_date,
           vessel.get('mmsi'), vessel.get('name')))
 
-    _cache_vessel(db, order_hash, vessel)
+    _cache_vessel(db, order_hash, vessel, leg=leg_override)
     db.commit()
 
     return jsonify({k: v for k, v in vessel.items() if not k.startswith("_")})
