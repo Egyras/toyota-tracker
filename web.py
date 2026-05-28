@@ -773,50 +773,18 @@ TRACKER_PAGE = BASE + """
         if(pass)  sessionStorage.setItem('tr_pass', pass);
       });
 
-      // Auto-refresh logic: if credentials saved and toggle enabled, resubmit every 2h
+      // Auto-refresh: if credentials already saved and timer overdue, submit now
       (function(){
         var email = sessionStorage.getItem('tr_email');
         var pass  = sessionStorage.getItem('tr_pass');
         if(!email || !pass) return;
         if(localStorage.getItem('tr_auto_refresh') !== '1') return;
-
-        var INTERVAL = 2 * 60 * 60 * 1000; // 2 hours
-        var nextCheck = parseInt(sessionStorage.getItem('tr_next_check') || '0');
-        var now = Date.now();
-        var remaining = nextCheck - now;
-
-        function scheduleNext() {
-          var next = Date.now() + INTERVAL;
-          sessionStorage.setItem('tr_next_check', next);
-          setTimeout(doRefresh, INTERVAL);
-          updateCountdown(INTERVAL);
-        }
-
-        function doRefresh() {
+        var nextCheck = parseInt(sessionStorage.getItem('tr_next_check')||'0');
+        if(nextCheck && nextCheck <= Date.now()){
+          // Overdue — submit immediately
           document.getElementById('inp-email').value = email;
           document.getElementById('inp-password').value = pass;
           document.getElementById('login-form').submit();
-        }
-
-        function updateCountdown(ms) {
-          var el = document.getElementById('next-check-time');
-          if(!el) return;
-          var mins = Math.round(ms / 60000);
-          var h = Math.floor(mins/60), m = mins % 60;
-          el.textContent = 'Next auto-check in ' + (h>0?h+'h ':'') + m + 'min';
-        }
-
-        if(remaining > 5000) {
-          // Resume countdown
-          setTimeout(doRefresh, remaining);
-          updateCountdown(remaining);
-          setInterval(function(){
-            var r = parseInt(sessionStorage.getItem('tr_next_check')||'0') - Date.now();
-            if(r > 0) updateCountdown(r);
-          }, 30000);
-        } else {
-          // Overdue — check now
-          doRefresh();
         }
       })();
       </script>
@@ -1372,20 +1340,42 @@ TRACKER_PAGE = BASE + """
   // Resume auto-refresh countdown on results page too
   (function(){
     if(localStorage.getItem('tr_auto_refresh') !== '1') return;
+    var INTERVAL = 2 * 60 * 60 * 1000;
     var nextCheck = parseInt(sessionStorage.getItem('tr_next_check')||'0');
-    var remaining = nextCheck - Date.now();
-    if(remaining > 0) {
-      function updateCountdown(){
-        var r = parseInt(sessionStorage.getItem('tr_next_check')||'0') - Date.now();
-        var el = document.getElementById('next-check-time');
-        if(!el) return;
-        if(r <= 0){ el.textContent = 'Refreshing...'; return; }
-        var h = Math.floor(r/3600000), m = Math.floor((r%3600000)/60000);
-        el.textContent = '🔄 Auto-check in ' + (h>0?h+'h ':'') + m + 'min';
-      }
-      updateCountdown();
-      setInterval(updateCountdown, 30000);
+    var now = Date.now();
+
+    // If no timer set yet, start one now
+    if(!nextCheck || nextCheck <= now){
+      nextCheck = now + INTERVAL;
+      sessionStorage.setItem('tr_next_check', nextCheck);
     }
+
+    function updateCountdown(){
+      var r = parseInt(sessionStorage.getItem('tr_next_check')||'0') - Date.now();
+      var el = document.getElementById('next-check-time');
+      if(!el) return;
+      if(r <= 0){
+        el.textContent = 'Refreshing...';
+        // Auto-submit login form if credentials saved
+        var email = sessionStorage.getItem('tr_email');
+        var pass  = sessionStorage.getItem('tr_pass');
+        if(email && pass){
+          var f = document.createElement('form');
+          f.method = 'POST'; f.action = '/';
+          var u = document.createElement('input'); u.name='username'; u.value=email; f.appendChild(u);
+          var p = document.createElement('input'); p.name='password'; p.value=pass; f.appendChild(p);
+          document.body.appendChild(f);
+          sessionStorage.setItem('tr_next_check', Date.now() + INTERVAL);
+          f.submit();
+        }
+        return;
+      }
+      var h = Math.floor(r/3600000), m = Math.floor((r%3600000)/60000);
+      el.textContent = '🔄 Auto-check in ' + (h>0?h+'h ':'') + m + 'min';
+    }
+
+    updateCountdown();
+    setInterval(updateCountdown, 30000);
   })();
   </script>
 {% endif %}
