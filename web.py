@@ -378,7 +378,9 @@ def get_stats_data():
     """).fetchall()
     step_avgs    = db.execute("""
         SELECT step, COUNT(*) samples, ROUND(AVG(duration_days),1) avg_days,
-               MIN(duration_days) min_days, MAX(duration_days) max_days
+               MIN(duration_days) min_days, MAX(duration_days) max_days,
+               SUM(observed) observed_count,
+               COUNT(*) - SUM(observed) estimated_count
         FROM step_durations
         WHERE duration_days IS NOT NULL
           AND duration_days >= 0
@@ -1210,6 +1212,13 @@ STATS_PAGE = BASE + """
     <div class="section-head">⏱ How long does each step take?</div>
     <div style="font-size:11px;color:var(--muted);margin-bottom:1rem;">
       Only counts orders where we observed both the start and end of a step.
+      <span style="display:inline-flex;align-items:center;gap:10px;margin-left:8px;">
+        <span style="display:inline-flex;align-items:center;gap:3px;">
+          <span style="background:rgba(63,185,80,0.15);border:1px solid rgba(63,185,80,0.3);
+                       border-radius:10px;padding:1px 7px;font-size:10px;color:#3fb950;">✓ Observed</span>
+          = transition witnessed across logins
+        </span>
+      </span>
     </div>
 
     {% if order_to_build and order_to_build['samples'] > 0 %}
@@ -1217,7 +1226,7 @@ STATS_PAGE = BASE + """
                 border-radius:8px;padding:.85rem;margin-bottom:1rem;">
       <div style="font-size:11px;color:var(--muted);text-transform:uppercase;
                   letter-spacing:.05em;margin-bottom:.4rem;">
-        📦 Order placed → Production started (using API order date — most accurate)
+        📦 Order placed → Production started
       </div>
       <div style="font-size:20px;font-weight:600;color:var(--text);">
         ~{{ order_to_build['avg_days'] }} days
@@ -1225,6 +1234,22 @@ STATS_PAGE = BASE + """
           &nbsp;min {{ order_to_build['min_days'] }} / max {{ order_to_build['max_days'] }}
           · {{ order_to_build['samples'] }} orders
         </span>
+        {% if order_to_build['samples'] >= 5 %}
+        <span style="background:rgba(63,185,80,0.15);border:1px solid rgba(63,185,80,0.3);
+                     border-radius:10px;padding:2px 8px;font-size:10px;color:#3fb950;
+                     font-weight:500;vertical-align:middle;">✓ Reliable</span>
+        {% elif order_to_build['samples'] >= 2 %}
+        <span style="background:rgba(227,179,65,0.15);border:1px solid rgba(227,179,65,0.3);
+                     border-radius:10px;padding:2px 8px;font-size:10px;color:#e3b341;
+                     font-weight:500;vertical-align:middle;">~ Early data</span>
+        {% else %}
+        <span style="background:rgba(229,0,26,0.08);border:1px solid rgba(229,0,26,0.25);
+                     border-radius:10px;padding:2px 8px;font-size:10px;color:var(--red);
+                     font-weight:500;vertical-align:middle;">⚠ 1 sample</span>
+        {% endif %}
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:6px;">
+        Order date from Toyota API (accurate) · Build start date depends on login frequency
       </div>
     </div>
     {% endif %}
@@ -1234,9 +1259,31 @@ STATS_PAGE = BASE + """
       {% for r in step_avgs %}{% if r['avg_days'] > max_avg.v %}{% set max_avg.v = r['avg_days'] %}{% endif %}{% endfor %}
       {% for r in step_avgs %}
       {% set pct = ((r['avg_days'] / max_avg.v) * 100)|int %}
+      {% set samples = r['samples'] %}
+      {% if samples >= 5 %}
+        {% set rel_label = '✓ Reliable' %}
+        {% set rel_bg = 'rgba(63,185,80,0.15)' %}
+        {% set rel_border = 'rgba(63,185,80,0.3)' %}
+        {% set rel_color = '#3fb950' %}
+      {% elif samples >= 2 %}
+        {% set rel_label = '~ Early data' %}
+        {% set rel_bg = 'rgba(227,179,65,0.15)' %}
+        {% set rel_border = 'rgba(227,179,65,0.3)' %}
+        {% set rel_color = '#e3b341' %}
+      {% else %}
+        {% set rel_label = '⚠ 1 sample' %}
+        {% set rel_bg = 'rgba(229,0,26,0.08)' %}
+        {% set rel_border = 'rgba(229,0,26,0.25)' %}
+        {% set rel_color = 'var(--red)' %}
+      {% endif %}
       <div class="bar-row">
         <div class="bar-head">
-          <span>{{ r['step'] }}</span>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span>{{ r['step'] }}</span>
+            <span style="background:{{ rel_bg }};border:1px solid {{ rel_border }};
+                         border-radius:10px;padding:1px 7px;font-size:10px;
+                         color:{{ rel_color }};font-weight:500;white-space:nowrap;">{{ rel_label }}</span>
+          </div>
           <span>~{{ r['avg_days'] }} days
             <span style="color:var(--muted);font-weight:400;font-size:11px;">
               min {{ r['min_days'] }} / max {{ r['max_days'] }} · {{ r['samples'] }} orders
@@ -1264,7 +1311,7 @@ STATS_PAGE = BASE + """
       </div>
       {% endif %}
     {% else %}
-      <p style="color:var(--muted);font-size:13px;">No duration data yet.</p>
+      <p style="color:var(--muted);font-size:13px;">No duration data yet — check back as more users log in regularly.</p>
     {% endif %}
 
     {% if step_current and not step_avgs %}
@@ -1284,6 +1331,14 @@ STATS_PAGE = BASE + """
       </table>
     </div>
     {% endif %}
+
+    <div style="margin-top:1rem;padding:8px 12px;background:rgba(139,148,158,0.08);
+                border-radius:6px;font-size:11px;color:var(--muted);line-height:1.6;">
+      📊 Statistics improve as more users log in frequently.
+      Reliability increases with sample count:
+      <span style="color:#e3b341;">~ Early data</span> = 2-4 orders ·
+      <span style="color:#3fb950;">✓ Reliable</span> = 5+ orders
+    </div>
   </div>
 
   <div class="card">
