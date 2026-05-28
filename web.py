@@ -377,15 +377,36 @@ def get_stats_data():
         GROUP BY dest_country ORDER BY total DESC LIMIT 20
     """).fetchall()
     step_avgs    = db.execute("""
-        SELECT step, COUNT(*) samples, ROUND(AVG(duration_days),1) avg_days,
-               MIN(duration_days) min_days, MAX(duration_days) max_days,
-               SUM(observed) observed_count,
-               COUNT(*) - SUM(observed) estimated_count
-        FROM step_durations
-        WHERE duration_days IS NOT NULL
-          AND duration_days >= 0
-          AND observed = 1
-        GROUP BY step ORDER BY step
+        SELECT sd.step,
+               COUNT(*) samples,
+               ROUND(AVG(sd.duration_days),1) avg_days,
+               MIN(sd.duration_days) min_days,
+               MAX(sd.duration_days) max_days,
+               SUM(sd.observed) observed_count
+        FROM step_durations sd
+        -- Only include orders where login frequency was good
+        JOIN (
+            SELECT order_hash,
+                   COUNT(*) logins,
+                   CAST(julianday(MAX(ts)) - julianday(MIN(ts)) AS INTEGER) days_tracked,
+                   -- avg days between logins (lower = more frequent)
+                   CASE
+                     WHEN COUNT(*) <= 1 THEN 99
+                     ELSE CAST(julianday(MAX(ts)) - julianday(MIN(ts)) AS REAL) / (COUNT(*) - 1)
+                   END avg_gap
+            FROM checks
+            WHERE order_hash IS NOT NULL
+            GROUP BY order_hash
+        ) freq ON sd.order_hash = freq.order_hash
+        WHERE sd.duration_days IS NOT NULL
+          AND sd.duration_days >= 0
+          AND sd.observed = 1
+          -- Only trust data from users who checked at least every 3 days on average
+          AND freq.avg_gap <= 3
+          -- Must have logged in at least twice
+          AND freq.logins >= 2
+        GROUP BY sd.step
+        ORDER BY sd.step
     """).fetchall()
     step_current = db.execute("""
         SELECT sd.step,
@@ -422,11 +443,23 @@ def get_stats_data():
             FROM checks WHERE created_on IS NOT NULL
             GROUP BY order_hash
         ) c ON sd_build.order_hash = c.order_hash
+        -- Only include frequently logging users
+        JOIN (
+            SELECT order_hash,
+                   COUNT(*) logins,
+                   CASE
+                     WHEN COUNT(*) <= 1 THEN 99
+                     ELSE CAST(julianday(MAX(ts)) - julianday(MIN(ts)) AS REAL) / (COUNT(*) - 1)
+                   END avg_gap
+            FROM checks WHERE order_hash IS NOT NULL GROUP BY order_hash
+        ) freq ON sd_build.order_hash = freq.order_hash
         WHERE sd_build.step = 'buildInProgress'
           AND sd_build.date_entered IS NOT NULL
           AND c.created_on IS NOT NULL
           AND julianday(sd_build.date_entered) > julianday(sd_proc.date_entered)
           AND julianday(sd_build.date_entered) > julianday(c.created_on)
+          AND freq.avg_gap <= 3
+          AND freq.logins >= 2
     """).fetchone()
     countries = db.execute(
         "SELECT COUNT(DISTINCT dest_country) FROM checks WHERE dest_country != '' AND dest_country IS NOT NULL AND order_hash IS NOT NULL"
