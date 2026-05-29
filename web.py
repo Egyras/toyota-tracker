@@ -1921,9 +1921,15 @@ def api_vessel_detect(order_hash):
             WHERE sd.order_hash=? AND sd.step='leftTheFactory'
             AND sd.date_entered IS NOT NULL
         """, (order_hash,)).fetchone()
-        if not row:
+        if row:
+            left_factory_date = row["date_entered"]
+        elif leg_override != 'nagoya':
+            # For hub legs (sagunto/zeebrugge/malmo) use today as departure date
+            # since the car just arrived at this hub
+            from datetime import datetime
+            left_factory_date = datetime.utcnow().strftime("%Y-%m-%d")
+        else:
             return jsonify(error="no leftTheFactory date"), 404
-        left_factory_date = row["date_entered"]
 
     vessel = detect_vessel(left_factory_date, leg=leg_override)
     if not vessel:
