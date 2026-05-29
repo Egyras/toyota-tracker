@@ -48,6 +48,11 @@ var TOYOTA_CARRIERS={
   "477307600":"Morning Highway",
   "357795000":"Triton Leader",
   "636020245":"Spica Leader",
+  "352006172":"Undine Highway",
+  "372158000":"Marguerite Ace",
+  "636022333":"Wild Rose Leader",
+  "308688000":"Emerald Leader",
+  "309905000":"Garnet Leader 2",
 };
 
 // Map delivery location names to detection leg
@@ -69,7 +74,35 @@ var LOCATION_NAME_TO_LEG = {
   "göteborg":             "gothenburg",
 };
 
-function getShipFinderPosition(mmsi) {
+// Toyota E5 berth coordinates at Nagoya port
+var E5_LAT_MIN = 35.04, E5_LAT_MAX = 35.06;
+var E5_LON_MIN = 136.87, E5_LON_MAX = 136.90;
+
+async function verifyE5Berth(mmsi, imo, departDate) {
+  // Check if vessel was at E5 berth within 5 days before departure
+  try {
+    var days = 60; // shipinfo.net free tier
+    var url = 'https://shipinfo.net/topos/api/vessel/track?days='+days+'&imo='+imo+'&mmsi='+mmsi;
+    var resp = await fetch(url);
+    var data = await resp.json();
+    var points = Array.isArray(data) ? data : (data.data || data.points || []);
+    var lf = new Date(departDate+'T00:00:00Z');
+    var window_start = new Date(lf.getTime() - 7*86400000);
+    var e5hits = points.filter(function(p){
+      if(!p.lat || !p.lng) return false;
+      var t = new Date(p.updated);
+      return t >= window_start && t <= lf &&
+             E5_LAT_MIN <= p.lat && p.lat <= E5_LAT_MAX &&
+             E5_LON_MIN <= p.lng && p.lng <= E5_LON_MAX &&
+             (p.speed_kn||0) === 0;
+    });
+    process.stderr.write('E5 berth check for '+mmsi+': '+e5hits.length+' hits\n');
+    return e5hits.length > 0;
+  } catch(e) {
+    process.stderr.write('E5 check failed: '+e.message+'\n');
+    return null; // null = unknown, don't reject
+  }
+}
   return new Promise(function(resolve) {
     var https = require('https');
     var opts = {
@@ -200,6 +233,24 @@ if(MMSI){
     if((matches[0].europeScore||0) === 0){
       process.stderr.write("Best match "+matches[0].vessel+" europeScore=0, rejecting — not Europe route\n");
       matches=[];
+    }
+    // For Nagoya leg: verify vessel was at E5 berth (35.04-35.06N, 136.87-136.90E)
+    if(LEG === 'nagoya' && matches.length > 0){
+      for(var vi=0; vi<matches.length; vi++){
+        var vm = matches[vi];
+        if(!vm.mmsi) continue;
+        // Try to get IMO from TOYOTA_CARRIERS lookup or skip
+        var e5ok = await verifyE5Berth(vm.mmsi, '', D);
+        if(e5ok === false){
+          process.stderr.write(vm.vessel+': NOT at E5 berth, removing\n');
+          vm.europeScore = -1; // demote
+        } else if(e5ok === true){
+          process.stderr.write(vm.vessel+': CONFIRMED at E5 berth ✅\n');
+          vm.europeScore += 10; // boost
+        }
+      }
+      matches.sort(function(a,b){return (b.europeScore||0)-(a.europeScore||0);});
+      matches = matches.filter(function(m){ return (m.europeScore||0) >= 0; });
     }
   }
 
