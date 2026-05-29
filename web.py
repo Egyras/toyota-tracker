@@ -1232,7 +1232,7 @@ TRACKER_PAGE = BASE + """
     map.fitBounds(latlngs,{padding:[30,30]});
 
     // Show vessel if order is at leftTheFactory or beyond, OR if vessel already detected
-    {% set show_vessel = order.currentStatus.currentStatus in ['LeftTheFactory','InTransit','ArrivedAtRetailer'] or order._vessel_mmsi %}
+    {% set show_vessel = order.currentStatus.currentStatus in ['LeftTheFactory','InTransit','LeftTheDepot','ArrivedAtRetailer'] or order._vessel_mmsi %}
     {% if show_vessel %}
     var vesselMarker = null;
     function loadVessel(mmsi, name, lat, lng, speed, course, dest) {
