@@ -1231,8 +1231,12 @@ TRACKER_PAGE = BASE + """
     });
     map.fitBounds(latlngs,{padding:[30,30]});
 
-    // Show vessel if order is at leftTheFactory or beyond, OR if vessel already detected
-    {% set show_vessel = order.currentStatus.currentStatus in ['LeftTheFactory','InTransit','LeftTheDepot','ArrivedAtRetailer'] or order._vessel_mmsi %}
+    // Show vessel only while car is actively at sea
+    // Stop tracking once car left port depot (now on truck to dealer)
+    {% set show_vessel = order.currentStatus.currentStatus in ['LeftTheFactory','InTransit'] or order._vessel_mmsi %}
+    {% if order.currentStatus.currentStatus in ['LeftTheDepot','ArrivedAtRetailer','ArrivedInDestination'] %}
+      {% set show_vessel = false %}
+    {% endif %}
     {% if show_vessel %}
     var vesselMarker = null;
     function loadVessel(mmsi, name, lat, lng, speed, course, dest) {
