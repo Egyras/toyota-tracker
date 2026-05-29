@@ -755,6 +755,21 @@ TRACKER_PAGE = BASE + """
           <label>Password</label>
           <input type="password" name="password" id="inp-password" required>
         </div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:1rem;
+                    display:flex;align-items:center;gap:6px;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               style="width:13px;height:13px;flex-shrink:0;color:#e3b341;">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="8" x2="12" y2="12"/>
+            <line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          Use your <strong style="color:var(--text);">My Toyota</strong> account credentials
+          — the same email and password you use at
+          <a href="https://www.toyota.com/configurator/api/lexicon/models"
+             target="_blank" style="color:var(--muted);text-decoration:underline;">
+            my.toyota.eu
+          </a>
+        </div>
         <button type="submit" class="btn">Check my order →</button>
 
         <div style="margin-top:1rem;display:flex;align-items:center;gap:10px;">
