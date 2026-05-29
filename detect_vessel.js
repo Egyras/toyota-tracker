@@ -103,6 +103,8 @@ async function verifyE5Berth(mmsi, imo, departDate) {
     return null; // null = unknown, don't reject
   }
 }
+
+function getShipFinderPosition(mmsi) {
   return new Promise(function(resolve) {
     var https = require('https');
     var opts = {
