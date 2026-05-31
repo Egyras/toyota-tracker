@@ -1871,7 +1871,8 @@ def api_vessel_detect(order_hash):
                     return jsonify({**pos, "cached": False, "leg": leg_override})
 
         # Fallback: check checks table (legacy, no leg info)
-        elif not leg_cached:
+        # Only use for nagoya leg — hub legs (zeebrugge/malmo etc) need fresh detection
+        elif not leg_cached and leg_override == 'nagoya':
             cached = db.execute("""
                 SELECT vessel_mmsi, vessel_name, vessel_lat, vessel_lon,
                        vessel_speed, vessel_course, vessel_dest, vessel_updated
