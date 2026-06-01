@@ -220,6 +220,15 @@ def get_db():
                     'vessel_speed','vessel_course','vessel_dest','vessel_updated']:
             if col not in cols:
                 db.execute(f"ALTER TABLE checks ADD COLUMN {col} TEXT")
+        # Geocoding cache table
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS geocache (
+                query  TEXT PRIMARY KEY,
+                lat    REAL,
+                lng    REAL,
+                cached_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
         db.commit()
         g.db = db
     return g.db
@@ -228,6 +237,71 @@ def get_db():
 def close_db(_):
     db = g.pop("db", None)
     if db: db.close()
+
+# Known Toyota logistics hubs — avoids Nominatim for common stops
+_KNOWN_COORDS = {
+    # Japan
+    "nagoya":           (35.0883, 137.1748),
+    "toyota city":      (35.0838, 137.1567),
+    "yokkaichi":        (34.9657, 136.6244),
+    # Europe — sea ports
+    "zeebrugge":        (51.3333,   3.1956),
+    "bremerhaven":      (53.5510,   8.5769),
+    "southampton":      (50.8998,  -1.4044),
+    "portbury":         (51.4942,  -2.7202),
+    "drammen":          (59.7440,  10.2045),
+    "malmö":            (55.6050,  13.0038),
+    "malmo":            (55.6050,  13.0038),
+    "sagunto":          (39.6779,  -0.2716),
+    "livorno":          (43.5487,  10.3106),
+    "piraeus":          (37.9667,  23.6333),
+    "varna":            (43.2141,  27.9147),
+    "constanta":        (44.1733,  28.6383),
+    "koper":            (45.5481,  13.7301),
+    "kotka":            (60.4664,  26.9457),
+    "paldiski":         (59.3548,  24.0544),
+    "göteborg":         (57.7089,  11.9746),
+    "gothenburg":       (57.7089,  11.9746),
+    # Transit / distribution
+    "singapore":        ( 1.3521, 103.8198),
+    "port klang":       ( 2.9982, 101.3839),
+    "colombo":          ( 6.9271,  79.8612),
+    "suez":             (29.9668,  32.5498),
+}
+
+def geocode_location(location_name: str, country_name: str = "") -> tuple:
+    """Return (lat, lng) for a delivery stop, using cache then Nominatim."""
+    # Try known-coords lookup (case-insensitive substring match)
+    name_lower = location_name.lower()
+    for key, coords in _KNOWN_COORDS.items():
+        if key in name_lower:
+            return coords
+
+    query = f"{location_name}, {country_name}".strip(", ")
+    try:
+        db = get_db()
+        row = db.execute("SELECT lat, lng FROM geocache WHERE query=?", (query,)).fetchone()
+        if row:
+            return (row['lat'], row['lng']) if row['lat'] is not None else None
+
+        import urllib.request, urllib.parse
+        url = "https://nominatim.openstreetmap.org/search?" + urllib.parse.urlencode({
+            "q": query, "format": "json", "limit": 1
+        })
+        req = urllib.request.Request(url, headers={"User-Agent": "ToyotaOrderTracker/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            results = json.loads(resp.read())
+        if results:
+            lat = float(results[0]['lat'])
+            lng = float(results[0]['lon'])
+        else:
+            lat = lng = None
+        db.execute("INSERT OR REPLACE INTO geocache (query, lat, lng) VALUES (?,?,?)",
+                   (query, lat, lng))
+        db.commit()
+        return (lat, lng) if lat is not None else None
+    except Exception:
+        return None
 
 def days_between(d1, d2):
     try:
@@ -1828,6 +1902,15 @@ def index():
                     details['_first_login']  = ''
                     details['_vessel_mmsi']  = ''
                     details['_vessel_name']  = ''
+                # Enrich intermediateDeliveries with lat/lng (API doesn't provide them)
+                for d in details.get('intermediateDeliveries') or []:
+                    if not d.get('locationLatitude'):
+                        coords = geocode_location(
+                            d.get('locationName', ''), d.get('countryName', '')
+                        )
+                        if coords:
+                            d['locationLatitude']  = coords[0]
+                            d['locationLongitude'] = coords[1]
                 orders.append(details)
 
         except Exception as e:
