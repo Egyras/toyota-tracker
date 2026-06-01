@@ -262,7 +262,31 @@ _KNOWN_COORDS = {
     "paldiski":         (59.3548,  24.0544),
     "göteborg":         (57.7089,  11.9746),
     "gothenburg":       (57.7089,  11.9746),
-    # Transit / distribution
+    # Other EU destinations
+    "vilnius":          (54.6872,  25.2797),
+    "riga":             (56.9460,  24.1059),
+    "tallinn":          (59.4370,  24.7536),
+    "helsinki":         (60.1699,  24.9384),
+    "warsaw":           (52.2297,  21.0122),
+    "prague":           (50.0755,  14.4378),
+    "budapest":         (47.4979,  19.0402),
+    "bucharest":        (44.4268,  26.1025),
+    "sofia":            (42.6977,  23.3219),
+    "zagreb":           (45.8150,  15.9819),
+    "bratislava":       (48.1486,  17.1077),
+    "ljubljana":        (46.0569,  14.5058),
+    "amsterdam":        (52.3676,   4.9041),
+    "brussels":         (50.8503,   4.3517),
+    "paris":            (48.8566,   2.3522),
+    "madrid":           (40.4168,  -3.7038),
+    "lisbon":           (38.7169,  -9.1399),
+    "vienna":           (48.2082,  16.3738),
+    "berlin":           (52.5200,  13.4050),
+    "munich":           (48.1351,  11.5820),
+    "hamburg":          (53.5753,  10.0153),
+    "rome":             (41.9028,  12.4964),
+    "milan":            (45.4642,   9.1900),
+    "zurich":           (47.3769,   8.5417),
     "singapore":        ( 1.3521, 103.8198),
     "port klang":       ( 2.9982, 101.3839),
     "colombo":          ( 6.9271,  79.8612),
@@ -341,7 +365,7 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True, created_o
                     db.execute("UPDATE checks SET status=?, ts=? WHERE rowid=?",
                                (current_status, datetime.utcnow().isoformat(), existing["rowid"]))
                     # When status changes to leftTheFactory, immediately record the date
-                    if current_status in ("LeftTheFactory", "leftTheFactory"):
+                    if current_status == "LeftTheFactory":
                         today_date = datetime.utcnow().strftime("%Y-%m-%d")
                         db.execute("""
                             INSERT INTO step_durations (order_hash, step, model, dest_country, date_entered, observed)
