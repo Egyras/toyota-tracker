@@ -341,7 +341,7 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True, created_o
                     db.execute("UPDATE checks SET status=?, ts=? WHERE rowid=?",
                                (current_status, datetime.utcnow().isoformat(), existing["rowid"]))
                     # When status changes to leftTheFactory, immediately record the date
-                    if current_status == "LeftTheFactory":
+                    if current_status in ("LeftTheFactory", "leftTheFactory"):
                         today_date = datetime.utcnow().strftime("%Y-%m-%d")
                         db.execute("""
                             INSERT INTO step_durations (order_hash, step, model, dest_country, date_entered, observed)
@@ -1356,8 +1356,8 @@ TRACKER_PAGE = BASE + """
 
     // Show vessel only while car is actively at sea
     // Stop tracking once car left port depot (now on truck to dealer)
-    {% set show_vessel = order.currentStatus.currentStatus in ['LeftTheFactory','InTransit'] or order._vessel_mmsi %}
-    {% if order.currentStatus.currentStatus in ['LeftTheDepot','ArrivedAtRetailer','ArrivedInDestination'] %}
+    {% set show_vessel = order.currentStatus.currentStatus in ['LeftTheFactory','leftTheFactory','InTransit','inTransit'] or order._vessel_mmsi %}
+    {% if order.currentStatus.currentStatus in ['LeftTheDepot','leftTheDepot','ArrivedAtRetailer','arrivedAtRetailer','ArrivedInDestination','arrivedInDestination'] %}
       {% set show_vessel = false %}
     {% endif %}
     {% if show_vessel %}
