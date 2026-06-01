@@ -108,8 +108,11 @@ var LOCATION_NAME_TO_LEG = {
 };
 
 // Toyota E5 berth coordinates at Nagoya port
-var E5_LAT_MIN = 35.04, E5_LAT_MAX = 35.06;
-var E5_LON_MIN = 136.87, E5_LON_MAX = 136.90;
+// Confirmed from AIS data: Bishu Highway (May 27), Equuleus Leader (May 26)
+// E5 = lat 35.048-35.062, lon 136.875-136.892
+// W5 (wrong berth, non-Europe routes) = lon ~136.850-136.858 — EXCLUDED by lon min
+var E5_LAT_MIN = 35.048, E5_LAT_MAX = 35.062;
+var E5_LON_MIN = 136.875, E5_LON_MAX = 136.892;
 
 // Zeebrugge Car Terminal (ZCT) coordinates
 // Confirmed from Wild Rose Leader, Elbe Highway, Garnet Leader 2 AIS data
