@@ -26,6 +26,20 @@ TOYOTA_CARRIERS = {
     "354910000": "Adriatic Highway",
     "636022929": "Morning Claire",
     "477307600": "Morning Highway",
+    "357795000": "Triton Leader",
+    "636020245": "Spica Leader",
+    "352006172": "Undine Highway",
+    "372158000": "Marguerite Ace",
+    "636022333": "Wild Rose Leader",
+    "308688000": "Emerald Leader",
+    "309905000": "Garnet Leader 2",
+    "432716000": "Bishu Highway",
+    "431323000": "Cepheus Leader",
+    "636022937": "Orchid Leader",
+    "432722000": "Dionysos Leader",
+    "432988000": "Libra Leader",
+    "431946000": "Leo Leader",
+    "477816600": "Danube Highway",
 }
 
 def get_vessel_position(mmsi: str) -> dict | None:

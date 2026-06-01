@@ -55,6 +55,11 @@ var TOYOTA_CARRIERS={
   "309905000":"Garnet Leader 2",
   "432716000":"Bishu Highway",
   "431323000":"Cepheus Leader",
+  "636022937":"Orchid Leader",
+  "432722000":"Dionysos Leader",
+  "432988000":"Libra Leader",
+  "431946000":"Leo Leader",
+  "477816600":"Danube Highway",
 };
 
 // Map delivery location names to detection leg
@@ -204,9 +209,9 @@ if(MMSI){
   var carriers = LEG === "nagoya" ? CARRIERS_LEG1 :
                  LEG === "zeebrugge" || LEG === "malmo" ? CARRIERS_LEG2 : CARRIERS_LEG1;
 
-  // Departure window: 5 days before the date (compensates for late logins)
+  // Departure window: 8 days before the date (compensates for late logins + slow DB updates)
   var lf=new Date(D+"T00:00:00Z");
-  var start=Math.floor((lf.getTime()-5*86400000)/1000);
+  var start=Math.floor((lf.getTime()-8*86400000)/1000);
   var end=Math.floor(lf.getTime()/1000);
   var u="https://www.myshiptracking.com/ports-arrivals-departures/?mmsi=&pid="+pid+"&type=2&time="+start+"_"+end+"&pp=200";
   process.stderr.write("Port "+LEG+" (pid:"+pid+") URL: "+u+"\n");
@@ -263,6 +268,41 @@ if(MMSI){
         await pg.waitForTimeout(3000);
         var vtext=await pg.textContent("body");
         m.europeScore=EUROPE.filter(function(p){return vtext.toUpperCase().includes(p);}).length;
+        // Check live destination — Singapore/Suez ARE normal stops on Europe route.
+        // Only penalise destinations that prove the vessel is on a non-Europe rotation:
+        // Americas, Pacific, Australia, or returning to Japan from Europe.
+        var OFF_ROUTE_DEST=[
+          'LOS ANGELES','LONG BEACH','BALTIMORE','BRUNSWICK','JACKSONVILLE',
+          'SYDNEY','MELBOURNE','AUCKLAND','FREMANTLE',
+          'DURBAN','MOMBASA','DAR ES SALAAM',
+          'YOKOHAMA','TOKYO','OSAKA','KOBE',  // returning to Japan (westbound vessels)
+          'BUSAN','GUANGZHOU','TIANJIN','SHANGHAI','HONG KONG','KAOHSIUNG',
+        ];
+        // Singapore, Port Klang, Colombo, Suez ARE on the Europe route — never penalise these.
+        try {
+          var liveApi="https://www.myshiptracking.com/requests/vesselsonmaptempTTT.php?type=json&minlat=-90&maxlat=90&minlon=-180&maxlon=180&zoom=2&selid="+m.mmsi+"&seltype=0&timecode=-1&filters=%7B%7D";
+          var liveResp=await pg.evaluate(async function(url){var r=await fetch(url);return await r.text();},liveApi);
+          var liveDestMatch=liveResp.match(m.mmsi+"\t[^\t]+\t[\d\.]+\t[\d\.]+\t[\d\.]+\t[\d\.]+\t[\d]+\t[\d]+\t[\d]+\t[\d]+\t\t[\d]+\t([A-Z>][^\n\t]*)");
+          if(liveDestMatch){
+            var liveDest=liveDestMatch[1].trim().replace(/^>/,"").toUpperCase();
+            process.stderr.write(m.vessel+": live dest="+liveDest+"\n");
+            var isOffRoute=OFF_ROUTE_DEST.some(function(d){return liveDest.indexOf(d)>=0;});
+            if(isOffRoute){
+              process.stderr.write(m.vessel+": off-route destination ("+liveDest+"), penalizing -20\n");
+              m.europeScore -= 20;
+            }
+            // Bonus: if already heading to a known Europe port, it's definitely the right ship
+            var EUROPE_DEST=['ZEEBRUGGE','BREMERHAVEN','SOUTHAMPTON','PORTBURY',
+                             'SAGUNTO','LIVORNO','MALMO','GOTHENBURG','PIRAEUS','DRAMMEN',
+                             'ANTWERP','ROTTERDAM','SUEZ','PORT SAID'];
+            var isEuropeDest=EUROPE_DEST.some(function(d){return liveDest.indexOf(d)>=0;});
+            if(isEuropeDest){
+              process.stderr.write(m.vessel+": heading to Europe ("+liveDest+"), bonus +5\n");
+              m.europeScore += 5;
+            }
+            m.liveDest = liveDest;
+          }
+        } catch(e) { process.stderr.write("Live dest check failed for "+m.vessel+": "+e.message+"\n"); }
         process.stderr.write(m.vessel+": europeScore="+m.europeScore+"\n");
       }catch(e){ m.europeScore=0; }
     }
