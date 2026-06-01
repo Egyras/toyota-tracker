@@ -266,6 +266,15 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True, created_o
                 if current_status and current_status != existing["status"]:
                     db.execute("UPDATE checks SET status=?, ts=? WHERE rowid=?",
                                (current_status, datetime.utcnow().isoformat(), existing["rowid"]))
+                    # When status changes to leftTheFactory, immediately record the date
+                    if current_status == "LeftTheFactory":
+                        today_date = datetime.utcnow().strftime("%Y-%m-%d")
+                        db.execute("""
+                            INSERT INTO step_durations (order_hash, step, model, dest_country, date_entered, observed)
+                            VALUES (?,?,?,?,?,0)
+                            ON CONFLICT(order_hash, step) DO UPDATE SET
+                                date_entered = COALESCE(date_entered, excluded.date_entered)
+                        """, (order_hash, 'leftTheFactory', model, dest_country, today_date))
                 # Still update created_on if missing
                 if created_on:
                     db.execute(
@@ -1341,23 +1350,22 @@ TRACKER_PAGE = BASE + """
 
         var legOverride = overrides[leg];
         hasUserDate = !!(legOverride && legOverride.depart_date);
+        // hasKnownVessel from DB takes priority over localStorage
         var dateReliable = hasUserDate || hasKnownVessel || (logins >= 2 && loginGap <= 3);
 
-        if(savedMMSI){
-          // Manual MMSI set — always use it
-          fetch('/api/vessel/'+savedMMSI)
-            .then(r=>r.json())
-            .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination); });
-        } else if(dateReliable && hash){
-          // Date is reliable — auto-detect
+        if(hash){
+          // Always use API — it handles leg-aware cache correctly
+          // Never use localStorage MMSI directly as it may be stale/wrong leg
           fetch('/api/vessel-detect/'+hash+'?leg='+leg)
             .then(r=>r.json())
             .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination); })
             .catch(()=>{});
-        } else if(hash) {
-          // Date unreliable — show prompt instead of wrong vessel
-          var prompt = document.getElementById('vessel-date-prompt');
-          if(prompt) prompt.style.display = 'block';
+          // Show prompt if date unreliable and no vessel known
+          if(!dateReliable){
+            var prompt = document.getElementById('vessel-date-prompt');
+            if(prompt) prompt.style.display = 'block';
+          }
+        }
         }
       })
       .catch(function(){
