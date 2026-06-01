@@ -471,7 +471,10 @@ async function getShipinfoPosition(mmsi, imo){
     return {
       lat: last.lat, lon: last.lng,
       speed: last.speed_kn != null ? last.speed_kn : null,
-      course: (last.course != null ? last.course : (last.heading != null ? last.heading : null)),
+      course: (last.course_deg != null ? last.course_deg
+               : (last.heading_deg != null ? last.heading_deg : null)),
+      dest: (last.destination && last.destination.trim()) ? last.destination.trim() : null,
+      eta: (last.eta && last.eta.trim()) ? last.eta.trim() : null,
       ageMin: ageMin, source: 'shipinfo'
     };
   } catch(e) {
@@ -514,6 +517,7 @@ if(result.mmsi){
       result.position=Object.assign({}, result.position, {
         lat:siPos.lat, lon:siPos.lon, speed:siPos.speed,
         course:(siPos.course != null ? siPos.course : result.position.course),
+        dest:(result.position.dest || siPos.dest || null),
         ageMin:siPos.ageMin, source:"shipinfo"
       });
       ageMin = siPos.ageMin;
@@ -523,7 +527,16 @@ if(result.mmsi){
       process.stderr.write("Still stale, trying ShipFinder...\n");
       var sfPos=await getShipFinderPosition(result.mmsi);
       if(sfPos&&sfPos.lat){
-        result.position=Object.assign({},result.position,sfPos,{name:result.position.name});
+        // Take position from ShipFinder but PRESERVE the MST destination
+        // (dest is stable; ShipFinder often has none). Same for name/course.
+        result.position=Object.assign({}, result.position, {
+          lat:sfPos.lat, lon:sfPos.lon, speed:sfPos.speed,
+          course:(sfPos.course != null ? sfPos.course : result.position.course),
+          dest:(result.position.dest || sfPos.dest || null),
+          ageMin:sfPos.ageMin != null ? sfPos.ageMin : result.position.ageMin,
+          source:"shipfinder",
+          name:result.position.name
+        });
       }
     }
   }
