@@ -425,6 +425,30 @@ if(MMSI){
   }
 }
 
+// Fetch freshest position from shipinfo.net satellite AIS track
+// (often fresher than MST/ShipFinder for deep-sea vessels)
+async function getShipinfoPosition(mmsi, imo){
+  try {
+    var url = 'https://shipinfo.net/topos/api/vessel/track?days=3&imo='+(imo||'')+'&mmsi='+mmsi;
+    var resp = await fetch(url);
+    var data = await resp.json();
+    var pts = Array.isArray(data) ? data : (data.data || data.points || []);
+    if(pts.length === 0) return null;
+    pts.sort(function(a,b){ return new Date(a.updated) - new Date(b.updated); });
+    var last = pts[pts.length-1];
+    if(!last.lat || !last.lng) return null;
+    var ageMin = Math.round((Date.now() - new Date(last.updated).getTime())/60000);
+    return {
+      lat: last.lat, lon: last.lng,
+      speed: last.speed_kn != null ? last.speed_kn : null,
+      ageMin: ageMin, source: 'shipinfo'
+    };
+  } catch(e) {
+    process.stderr.write('shipinfo position fetch failed: '+e.message+'\n');
+    return null;
+  }
+}
+
 // Get position
 if(result.mmsi){
   var apiUrl="https://www.myshiptracking.com/requests/vesselonmap.php?type=json&mmsi="+result.mmsi+"&_="+Date.now();
@@ -451,10 +475,24 @@ if(result.mmsi){
   };
 
   if(ageMin > 60){
-    process.stderr.write("MST stale ("+ageMin+"min), trying ShipFinder...\n");
-    var sfPos=await getShipFinderPosition(result.mmsi);
-    if(sfPos&&sfPos.lat){
-      result.position=Object.assign({},result.position,sfPos,{name:result.position.name});
+    process.stderr.write("MST stale ("+ageMin+"min), trying shipinfo.net...\n");
+    // Try shipinfo.net first — best satellite AIS coverage for deep-sea ships
+    var siPos=await getShipinfoPosition(result.mmsi, VESSEL_IMO[result.mmsi]||'');
+    if(siPos && siPos.lat && siPos.ageMin < ageMin){
+      process.stderr.write("shipinfo fresher ("+siPos.ageMin+"min vs "+ageMin+"min)\n");
+      result.position=Object.assign({}, result.position, {
+        lat:siPos.lat, lon:siPos.lon, speed:siPos.speed,
+        ageMin:siPos.ageMin, source:"shipinfo"
+      });
+      ageMin = siPos.ageMin;
+    }
+    // If still stale, try ShipFinder as last resort
+    if(ageMin > 60){
+      process.stderr.write("Still stale, trying ShipFinder...\n");
+      var sfPos=await getShipFinderPosition(result.mmsi);
+      if(sfPos&&sfPos.lat){
+        result.position=Object.assign({},result.position,sfPos,{name:result.position.name});
+      }
     }
   }
 }
