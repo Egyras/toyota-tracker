@@ -108,11 +108,8 @@ var LOCATION_NAME_TO_LEG = {
 };
 
 // Toyota E5 berth coordinates at Nagoya port
-// Confirmed from AIS data: Bishu Highway (May 27), Equuleus Leader (May 26)
-// E5 = lat 35.048-35.062, lon 136.875-136.892
-// W5 (wrong berth, non-Europe routes) = lon ~136.850-136.858 — EXCLUDED by lon min
-var E5_LAT_MIN = 35.048, E5_LAT_MAX = 35.062;
-var E5_LON_MIN = 136.875, E5_LON_MAX = 136.892;
+var E5_LAT_MIN = 35.04, E5_LAT_MAX = 35.06;
+var E5_LON_MIN = 136.87, E5_LON_MAX = 136.90;
 
 // Zeebrugge Car Terminal (ZCT) coordinates
 // Confirmed from Wild Rose Leader, Elbe Highway, Garnet Leader 2 AIS data
@@ -124,31 +121,65 @@ var ZCT_LON_MIN = 3.215,  ZCT_LON_MAX = 3.240;
 var MALMO_LAT_MIN = 55.610, MALMO_LAT_MAX = 55.630;
 var MALMO_LON_MIN = 12.990, MALMO_LON_MAX = 13.015;
 
+// Known Nagoya Toyota berths — confirmed from AIS data May 2026
+var NAGOYA_BERTHS = [
+  // E5 — Toyota EUROPE loading berth (confirmed: Bishu Highway, Equuleus Leader, Undine Highway etc.)
+  { name:'E5', europe:true,
+    latMin:35.048, latMax:35.062, lonMin:136.875, lonMax:136.892 },
+  // W5 — Non-Europe routes (confirmed: Dionysos Leader → Americas)
+  { name:'W5', europe:false,
+    latMin:35.048, latMax:35.062, lonMin:136.848, lonMax:136.862 },
+  // Kinjo South — different terminal entirely (Orchid Leader → China)
+  { name:'KINJO', europe:false,
+    latMin:35.025, latMax:35.040, lonMin:136.788, lonMax:136.808 },
+];
+
 async function verifyBerth(mmsi, imo, departDate, leg) {
   try {
-    var latMin, latMax, lonMin, lonMax;
-    if(leg === 'nagoya'){
-      latMin=E5_LAT_MIN; latMax=E5_LAT_MAX; lonMin=E5_LON_MIN; lonMax=E5_LON_MAX;
-    } else if(leg === 'zeebrugge'){
-      latMin=ZCT_LAT_MIN; latMax=ZCT_LAT_MAX; lonMin=ZCT_LON_MIN; lonMax=ZCT_LON_MAX;
-    } else if(leg === 'malmo'){
-      latMin=MALMO_LAT_MIN; latMax=MALMO_LAT_MAX; lonMin=MALMO_LON_MIN; lonMax=MALMO_LON_MAX;
-    } else {
-      return null; // no berth verification for other legs
-    }
     var url = 'https://shipinfo.net/topos/api/vessel/track?days=60&imo='+imo+'&mmsi='+mmsi;
     var resp = await fetch(url);
     var data = await resp.json();
     var points = Array.isArray(data) ? data : (data.data || data.points || []);
     var lf = new Date(departDate+'T00:00:00Z');
     var window_start = new Date(lf.getTime() - 7*86400000);
-    var hits = points.filter(function(p){
+    // Only stationary points within the time window
+    var window_pts = points.filter(function(p){
       if(!p.lat || !p.lng) return false;
       var t = new Date(p.updated);
-      return t >= window_start && t <= lf &&
-             latMin <= p.lat && p.lat <= latMax &&
-             lonMin <= p.lng && p.lng <= lonMax &&
-             (p.speed_kn||0) <= 1;
+      return t >= window_start && t <= lf && (p.speed_kn||0) <= 1;
+    });
+
+    if(leg === 'nagoya'){
+      // Check each known Nagoya berth
+      for(var bi=0; bi<NAGOYA_BERTHS.length; bi++){
+        var b = NAGOYA_BERTHS[bi];
+        var hits = window_pts.filter(function(p){
+          return b.latMin <= p.lat && p.lat <= b.latMax &&
+                 b.lonMin <= p.lng && p.lng <= b.lonMax;
+        });
+        if(hits.length > 0){
+          process.stderr.write('Berth check: '+mmsi+' at '+b.name+
+            ' (europe='+b.europe+'): '+hits.length+' hits\n');
+          // Return berth name so caller can decide score
+          return b.europe ? 'E5' : b.name;
+        }
+      }
+      process.stderr.write('Berth check: '+mmsi+' NOT at any known Nagoya berth\n');
+      return false;
+    }
+
+    // Zeebrugge and Malmo — single berth check
+    var latMin, latMax, lonMin, lonMax;
+    if(leg === 'zeebrugge'){
+      latMin=ZCT_LAT_MIN; latMax=ZCT_LAT_MAX; lonMin=ZCT_LON_MIN; lonMax=ZCT_LON_MAX;
+    } else if(leg === 'malmo'){
+      latMin=MALMO_LAT_MIN; latMax=MALMO_LAT_MAX; lonMin=MALMO_LON_MIN; lonMax=MALMO_LON_MAX;
+    } else {
+      return null;
+    }
+    var hits = window_pts.filter(function(p){
+      return latMin <= p.lat && p.lat <= latMax &&
+             lonMin <= p.lng && p.lng <= lonMax;
     });
     process.stderr.write('Berth check ('+leg+') for '+mmsi+': '+hits.length+' hits\n');
     return hits.length > 0;
@@ -362,14 +393,26 @@ if(MMSI){
         var vm = matches[vi];
         if(!vm.mmsi) continue;
         var berthOk = await verifyBerth(vm.mmsi, vm.imo||VESSEL_IMO[vm.mmsi]||'', D, LEG);
-        if(berthOk === false){
-          process.stderr.write(vm.vessel+': NOT at '+LEG+' berth, removing\n');
+        if(berthOk === 'E5'){
+          // Confirmed at Toyota Europe berth — strong positive signal
+          process.stderr.write(vm.vessel+': CONFIRMED at E5 (Europe berth) ✅\n');
+          vm.europeScore += 15;
+          vm.berthConfirmed = true;
+        } else if(berthOk === false){
+          // At Nagoya but wrong berth OR not at Nagoya at all
+          process.stderr.write(vm.vessel+': NOT at any Nagoya Toyota berth, removing\n');
+          vm.europeScore = -1;
+        } else if(typeof berthOk === 'string' && berthOk !== 'E5'){
+          // Named wrong berth (W5, KINJO) — confirmed non-Europe
+          process.stderr.write(vm.vessel+': at '+berthOk+' (non-Europe berth), removing\n');
           vm.europeScore = -1;
         } else if(berthOk === true){
+          // Zeebrugge/Malmo confirmed
           process.stderr.write(vm.vessel+': CONFIRMED at '+LEG+' berth ✅\n');
           vm.europeScore += 10;
           vm.berthConfirmed = true;
         }
+        // berthOk === null means shipinfo.net had no data — neutral, keep europeScore as-is
       }
       matches.sort(function(a,b){return (b.europeScore||0)-(a.europeScore||0);});
       matches = matches.filter(function(m){ return (m.europeScore||0) >= 0; });
