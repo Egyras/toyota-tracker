@@ -62,10 +62,11 @@ def get_vessel_position(mmsi: str) -> dict | None:
                         'lat':         pos['lat'],
                         'lon':         pos['lon'],
                         'speed':       pos.get('speed', 0),
-                        'course':      0,
+                        'course':      pos.get('course'),
                         'destination': pos.get('dest', ''),
+                        'eta':         pos.get('eta', ''),
                         'updated':     pos.get('updated', ''),
-                        'source':      'myshiptracking',
+                        'source':      pos.get('source', 'myshiptracking'),
                     }
         except Exception as e:
             print(f"[vessel pos scraper] {e}", file=sys.stderr)
@@ -88,13 +89,13 @@ def _cache_vessel(db, order_hash: str, vessel: dict, leg: str = "nagoya"):
         db.execute("""
             UPDATE checks SET vessel_mmsi=?, vessel_name=?, vessel_lat=?,
                               vessel_lon=?, vessel_speed=?, vessel_course=?,
-                              vessel_dest=?, vessel_updated=?
+                              vessel_dest=?, vessel_eta=?, vessel_updated=?
             WHERE order_hash=?
         """, (
             vessel.get("mmsi"), vessel.get("name"),
             vessel.get("lat"), vessel.get("lon"),
             vessel.get("speed"), vessel.get("course"),
-            vessel.get("destination"),
+            vessel.get("destination"), vessel.get("eta"),
             datetime.utcnow().isoformat(),
             order_hash
         ))
@@ -249,7 +250,7 @@ def get_db():
         # hub_legs table created by executescript above if not exists
         # Vessel tracking columns
         for col in ['vessel_mmsi','vessel_name','vessel_lat','vessel_lon',
-                    'vessel_speed','vessel_course','vessel_dest','vessel_updated']:
+                    'vessel_speed','vessel_course','vessel_dest','vessel_eta','vessel_updated']:
             if col not in cols:
                 db.execute(f"ALTER TABLE checks ADD COLUMN {col} TEXT")
         # Geocoding cache table
@@ -1574,7 +1575,7 @@ TRACKER_PAGE = BASE + """
     {% endif %}
     {% if show_vessel %}
     var vesselMarker = null;
-    function loadVessel(mmsi, name, lat, lng, speed, course, dest) {
+    function loadVessel(mmsi, name, lat, lng, speed, course, dest, eta) {
       if (vesselMarker) map.removeLayer(vesselMarker);
       var icon = L.divIcon({
         className:'',
@@ -1592,6 +1593,7 @@ TRACKER_PAGE = BASE + """
           '<b>'+name+'</b><br>'+
           'Speed: '+speed+' kn'+((course!==null&&course!==undefined&&course!==0&&course!=='')?' · Course: '+course+'°':'')+'<br>'+
           (dest?'Dest: '+dest+'<br>':'')+
+          (eta?'ETA: '+eta+'<br>':'')+
           '<small style="color:#aaa">MMSI: '+mmsi+'</small>'
         );
       // Extend map bounds to include vessel
@@ -1652,7 +1654,7 @@ TRACKER_PAGE = BASE + """
           // Never use localStorage MMSI directly as it may be stale/wrong leg
           fetch('/api/vessel-detect/'+hash+'?leg='+leg)
             .then(r=>r.json())
-            .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination); })
+            .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta); })
             .catch(()=>{});
           // Show prompt if date unreliable and no vessel known
           if(!dateReliable){
@@ -1666,7 +1668,7 @@ TRACKER_PAGE = BASE + """
         if(hash){
           fetch('/api/vessel-detect/'+hash)
             .then(r=>r.json())
-            .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination); })
+            .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta); })
             .catch(()=>{});
         }
       });
@@ -2261,7 +2263,7 @@ def api_vessel_detect(order_hash):
                 # Serve from checks position cache if position is fresh
                 cached = db.execute("""
                     SELECT vessel_mmsi, vessel_name, vessel_lat, vessel_lon,
-                           vessel_speed, vessel_course, vessel_dest, vessel_updated
+                           vessel_speed, vessel_course, vessel_dest, vessel_eta, vessel_updated
                     FROM checks WHERE order_hash=? AND vessel_mmsi=?
                     LIMIT 1
                 """, (order_hash, mmsi)).fetchone()
@@ -2274,6 +2276,7 @@ def api_vessel_detect(order_hash):
                         "speed":       float(cached["vessel_speed"] or 0),
                         "course":      (float(cached["vessel_course"]) if cached["vessel_course"] not in (None, 0, 0.0) else None),
                         "destination": cached["vessel_dest"] or "",
+                        "eta":         cached["vessel_eta"] or "",
                         "cached":      True, "leg": leg_override,
                         "berth_verified": bool(berth_verified),
                     })
@@ -2290,7 +2293,7 @@ def api_vessel_detect(order_hash):
         elif not leg_cached and leg_override == 'nagoya':
             cached = db.execute("""
                 SELECT vessel_mmsi, vessel_name, vessel_lat, vessel_lon,
-                       vessel_speed, vessel_course, vessel_dest, vessel_updated
+                       vessel_speed, vessel_course, vessel_dest, vessel_eta, vessel_updated
                 FROM checks WHERE order_hash=?
                 AND vessel_mmsi IS NOT NULL
                 LIMIT 1
@@ -2312,6 +2315,7 @@ def api_vessel_detect(order_hash):
                         "speed":       float(cached["vessel_speed"] or 0),
                         "course":      (float(cached["vessel_course"]) if cached["vessel_course"] not in (None, 0, 0.0) else None),
                         "destination": cached["vessel_dest"] or "",
+                        "eta":         cached["vessel_eta"] or "",
                         "cached":      True,
                     })
                 else:
@@ -2327,6 +2331,7 @@ def api_vessel_detect(order_hash):
                         "speed":       float(cached["vessel_speed"] or 0),
                         "course":      (float(cached["vessel_course"]) if cached["vessel_course"] not in (None, 0, 0.0) else None),
                         "destination": cached["vessel_dest"] or "",
+                        "eta":         cached["vessel_eta"] or "",
                         "cached":      True, "stale": True,
                     })
 

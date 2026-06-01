@@ -483,6 +483,50 @@ async function getShipinfoPosition(mmsi, imo){
   }
 }
 
+// Scrape MST vessel DETAIL page for destination + ETA.
+// The map feed (vesselsonmaptempTTT) has NO destination; the detail page does.
+// Returns {dest, eta} or null. Uses the in-browser page context to avoid blocks.
+async function getMstDetail(pg, mmsi, imo, name){
+  try {
+    // Build the detail-page slug: name-mmsi-MMSI-imo-IMO
+    var slug = (name||TOYOTA_CARRIERS[mmsi]||"vessel")
+                 .toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"");
+    var url = "https://www.myshiptracking.com/vessels/"+slug+"-mmsi-"+mmsi+(imo?("-imo-"+imo):"");
+    var html = await pg.evaluate(async function(u){
+      try { var r = await fetch(u); return await r.text(); } catch(e){ return ""; }
+    }, url);
+    if(!html) return null;
+    // Destination: inside myst-arrival-cont, first <h3 ...>DEST</h3>
+    var dest = null;
+    var arrIdx = html.indexOf("myst-arrival-cont");
+    if(arrIdx >= 0){
+      var seg = html.slice(arrIdx, arrIdx+400);
+      var dm = seg.match(/<h3[^>]*>([^<]+)<\/h3>/);
+      if(dm) dest = dm[1].trim();
+    }
+    // ETA: after "ETA*" label, the date span (+ time)
+    var eta = null;
+    var etaIdx = html.indexOf("ETA*");
+    if(etaIdx >= 0){
+      var eseg = html.slice(etaIdx, etaIdx+220);
+      var ed = eseg.match(/<span class="line">([\d]{4}-[\d]{2}-[\d]{2})<\/span>\s*<span class="line"><b>([^<]+)<\/b>/);
+      if(ed) eta = ed[1] + " " + ed[2].trim();
+      else {
+        var ed2 = eseg.match(/<span class="line">([\d]{4}-[\d]{2}-[\d]{2})<\/span>/);
+        if(ed2) eta = ed2[1];
+      }
+    }
+    if(dest || eta){
+      process.stderr.write("MST detail: dest="+dest+" eta="+eta+"\n");
+      return { dest: dest, eta: eta };
+    }
+    return null;
+  } catch(e) {
+    process.stderr.write("MST detail scrape failed: "+e.message+"\n");
+    return null;
+  }
+}
+
 // Get position
 if(result.mmsi){
   var apiUrl="https://www.myshiptracking.com/requests/vesselonmap.php?type=json&mmsi="+result.mmsi+"&_="+Date.now();
@@ -494,17 +538,14 @@ if(result.mmsi){
   var speed=parts[2]?parseFloat(parts[2]):null;
   var ageMin=parts[3]?parseInt(parts[3]):99999;
 
-  var destResp=await pg.evaluate(async function(mmsi){
-    var url="https://www.myshiptracking.com/requests/vesselsonmaptempTTT.php?type=json&minlat=-90&maxlat=90&minlon=-180&maxlon=180&zoom=2&selid="+mmsi+"&seltype=0&timecode=-1&filters=%7B%7D";
-    var r=await fetch(url);return await r.text();
-  },result.mmsi);
-  var destMatch=destResp.match(result.mmsi+"\t([^\t]+)\t[\\d\\.]+\t[\\d\\.]+\t[\\d\\.]+\t[\\d\\.]+\t[\\d]+\t[\\d]+\t[\\d]+\t[\\d]+\t\t[\\d]+\t([A-Z>][^\n\t]*)");
-  var name=destMatch?destMatch[1].trim():null;
-  var dest=destMatch?destMatch[2].trim().replace(/^>/,""):null;
+  // Destination + ETA come from the MST detail page (map feed has neither)
+  var detail = await getMstDetail(pg, result.mmsi, VESSEL_IMO[result.mmsi]||'', TOYOTA_CARRIERS[result.mmsi]);
+  var dest = detail ? detail.dest : null;
+  var eta  = detail ? detail.eta  : null;
 
   result.position={
-    lat:lat, lon:lon, speed:speed, dest:dest,
-    name:name||TOYOTA_CARRIERS[result.mmsi]||"",
+    lat:lat, lon:lon, speed:speed, dest:dest, eta:eta,
+    name:TOYOTA_CARRIERS[result.mmsi]||"",
     source:"myshiptracking", ageMin:ageMin
   };
 
@@ -518,6 +559,7 @@ if(result.mmsi){
         lat:siPos.lat, lon:siPos.lon, speed:siPos.speed,
         course:(siPos.course != null ? siPos.course : result.position.course),
         dest:(result.position.dest || siPos.dest || null),
+        eta:(result.position.eta || siPos.eta || null),
         ageMin:siPos.ageMin, source:"shipinfo"
       });
       ageMin = siPos.ageMin;
@@ -533,6 +575,7 @@ if(result.mmsi){
           lat:sfPos.lat, lon:sfPos.lon, speed:sfPos.speed,
           course:(sfPos.course != null ? sfPos.course : result.position.course),
           dest:(result.position.dest || sfPos.dest || null),
+          eta:(result.position.eta || null),
           ageMin:sfPos.ageMin != null ? sfPos.ageMin : result.position.ageMin,
           source:"shipfinder",
           name:result.position.name
