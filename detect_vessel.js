@@ -107,10 +107,6 @@ var LOCATION_NAME_TO_LEG = {
   "göteborg":             "gothenburg",
 };
 
-// Toyota E5 berth coordinates at Nagoya port
-var E5_LAT_MIN = 35.04, E5_LAT_MAX = 35.06;
-var E5_LON_MIN = 136.87, E5_LON_MAX = 136.90;
-
 // Zeebrugge Car Terminal (ZCT) coordinates
 // Confirmed from Wild Rose Leader, Elbe Highway, Garnet Leader 2 AIS data
 var ZCT_LAT_MIN = 51.295, ZCT_LAT_MAX = 51.315;
