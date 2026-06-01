@@ -1472,7 +1472,6 @@ TRACKER_PAGE = BASE + """
             if(prompt) prompt.style.display = 'block';
           }
         }
-        }
       })
       .catch(function(){
         // Fallback — try detection anyway
