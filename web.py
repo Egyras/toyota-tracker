@@ -35,8 +35,6 @@ TOYOTA_CARRIERS = {
     "309905000": "Garnet Leader 2",
     "432716000": "Bishu Highway",
     "431323000": "Cepheus Leader",
-    "636022937": "Orchid Leader",
-    "432722000": "Dionysos Leader",
     "432988000": "Libra Leader",
     "431946000": "Leo Leader",
     "477816600": "Danube Highway",
@@ -141,11 +139,12 @@ def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya") -> dict |
         for m in matches:
             if m.get('mmsi'):
                 return {
-                    'mmsi':   m['mmsi'],
-                    'name':   m.get('vessel', ''),
-                    'source': 'scraper',
-                    'time':   m.get('time', ''),
-                    'leg':    leg,
+                    'mmsi':          m['mmsi'],
+                    'name':          m.get('vessel', ''),
+                    'source':        'scraper',
+                    'time':          m.get('time', ''),
+                    'leg':           leg,
+                    'berth_verified': data.get('berth_verified', False),
                 }
         return None
     except Exception as e:
@@ -212,6 +211,7 @@ def get_db():
                 detected_at   TEXT,
                 created_at    TEXT DEFAULT (datetime('now')),
                 source        TEXT,
+                berth_verified INTEGER DEFAULT 0,
                 UNIQUE(order_hash, leg)
             );
             CREATE TABLE IF NOT EXISTS order_names (
@@ -229,6 +229,9 @@ def get_db():
         sd_cols = [r[1] for r in db.execute("PRAGMA table_info(step_durations)").fetchall()]
         if 'observed' not in sd_cols:
             db.execute("ALTER TABLE step_durations ADD COLUMN observed INTEGER DEFAULT 0")
+        vo_cols = [r[1] for r in db.execute("PRAGMA table_info(vessel_overrides)").fetchall()]
+        if 'berth_verified' not in vo_cols:
+            db.execute("ALTER TABLE vessel_overrides ADD COLUMN berth_verified INTEGER DEFAULT 0")
         # Vessel tracking columns
         for col in ['vessel_mmsi','vessel_name','vessel_lat','vessel_lon',
                     'vessel_speed','vessel_course','vessel_dest','vessel_updated']:
@@ -2002,7 +2005,7 @@ def api_vessel_detect(order_hash):
     if not depart_date_override and not mmsi_override:
         # Check vessel_overrides for this specific leg (leg-aware cache)
         leg_cached = db.execute("""
-            SELECT detected_mmsi, detected_name, detected_at
+            SELECT detected_mmsi, detected_name, detected_at, berth_verified
             FROM vessel_overrides
             WHERE order_hash=? AND leg=?
             AND detected_mmsi IS NOT NULL
@@ -2010,20 +2013,28 @@ def api_vessel_detect(order_hash):
 
         if leg_cached:
             mmsi = leg_cached["detected_mmsi"]
+            berth_verified = leg_cached["berth_verified"]
             age = db.execute("""
                 SELECT CAST((julianday('now') - julianday(?)) * 24 AS INTEGER)
             """, (leg_cached["detected_at"],)).fetchone()
-            stale = age and age[0] > 6
+            pos_age = db.execute("""
+                SELECT CAST((julianday('now') - julianday(vessel_updated)) * 24 AS INTEGER)
+                FROM checks WHERE order_hash=? AND vessel_mmsi=? LIMIT 1
+            """, (order_hash, mmsi)).fetchone()
+            # Berth-verified vessels: never re-detect, only refresh position every 6h
+            # Unverified vessels: re-detect after 6h (detection may have been wrong)
+            stale_identity = (not berth_verified) and age and age[0] > 6
+            stale_position = pos_age and pos_age[0] > 6
 
-            if not stale:
-                # Serve from checks position cache
+            if not stale_identity:
+                # Serve from checks position cache if position is fresh
                 cached = db.execute("""
                     SELECT vessel_mmsi, vessel_name, vessel_lat, vessel_lon,
                            vessel_speed, vessel_course, vessel_dest, vessel_updated
                     FROM checks WHERE order_hash=? AND vessel_mmsi=?
                     LIMIT 1
                 """, (order_hash, mmsi)).fetchone()
-                if cached and cached["vessel_lat"]:
+                if cached and cached["vessel_lat"] and not stale_position:
                     return jsonify({
                         "mmsi":        cached["vessel_mmsi"],
                         "name":        cached["vessel_name"],
@@ -2033,13 +2044,15 @@ def api_vessel_detect(order_hash):
                         "course":      float(cached["vessel_course"] or 0),
                         "destination": cached["vessel_dest"] or "",
                         "cached":      True, "leg": leg_override,
+                        "berth_verified": bool(berth_verified),
                     })
-            else:
-                # Stale — refresh position only
+                # Position stale — refresh position only, keep vessel identity
                 pos = get_vessel_position(mmsi)
                 if pos:
                     _cache_vessel(db, order_hash, pos, leg=leg_override)
-                    return jsonify({**pos, "cached": False, "leg": leg_override})
+                    return jsonify({**pos, "cached": False, "leg": leg_override,
+                                    "berth_verified": bool(berth_verified)})
+            # Identity stale and not berth-verified — fall through to re-detect
 
         # Fallback: check checks table (legacy, no leg info)
         # Only use for nagoya leg — hub legs (zeebrugge/malmo etc) need fresh detection
@@ -2112,16 +2125,18 @@ def api_vessel_detect(order_hash):
         return jsonify(error="no vessel detected"), 404
 
     # Save detection result to vessel_overrides
+    bv = 1 if vessel.get('berth_verified') else 0
     db.execute("""
-        INSERT INTO vessel_overrides (order_hash, leg, depart_date, detected_mmsi, detected_name, detected_at, source)
-        VALUES (?, ?, ?, ?, ?, datetime('now'), 'auto')
+        INSERT INTO vessel_overrides (order_hash, leg, depart_date, detected_mmsi, detected_name, detected_at, source, berth_verified)
+        VALUES (?, ?, ?, ?, ?, datetime('now'), 'auto', ?)
         ON CONFLICT(order_hash, leg) DO UPDATE SET
-            detected_mmsi = excluded.detected_mmsi,
-            detected_name = excluded.detected_name,
-            detected_at   = excluded.detected_at,
-            source        = CASE WHEN mmsi IS NOT NULL THEN 'user' ELSE 'auto' END
+            detected_mmsi  = excluded.detected_mmsi,
+            detected_name  = excluded.detected_name,
+            detected_at    = excluded.detected_at,
+            source         = CASE WHEN mmsi IS NOT NULL THEN 'user' ELSE 'auto' END,
+            berth_verified = MAX(berth_verified, excluded.berth_verified)
     """, (order_hash, leg_override, left_factory_date,
-          vessel.get('mmsi'), vessel.get('name')))
+          vessel.get('mmsi'), vessel.get('name'), bv))
 
     _cache_vessel(db, order_hash, vessel, leg=leg_override)
     db.commit()

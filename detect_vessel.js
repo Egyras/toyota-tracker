@@ -55,11 +55,37 @@ var TOYOTA_CARRIERS={
   "309905000":"Garnet Leader 2",
   "432716000":"Bishu Highway",
   "431323000":"Cepheus Leader",
-  "636022937":"Orchid Leader",
-  "432722000":"Dionysos Leader",
   "432988000":"Libra Leader",
   "431946000":"Leo Leader",
   "477816600":"Danube Highway",
+};
+
+// IMO lookup for berth verification — MMSI -> IMO
+// Without IMO, shipinfo.net track API returns no data
+var VESSEL_IMO = {
+  "431262000":"9291347",  // Hamburg Highway
+  "311995000":"9388571",  // Elbe Highway
+  "353100000":"9291359",  // Galveston Highway
+  "248910000":"9138338",  // Toreador
+  "432817000":"9388545",  // Altair Leader
+  "431816000":"9342906",  // Equuleus Leader
+  "432985000":"9342894",  // Garnet Leader
+  "431912000":"9388533",  // Sagittarius Leader
+  "354910000":"9291361",  // Adriatic Highway
+  "636022929":"9388497",  // Morning Claire
+  "477307600":"9388501",  // Morning Highway
+  "357795000":"9388557",  // Triton Leader
+  "636020245":"9388521",  // Spica Leader
+  "352006172":"9388583",  // Undine Highway
+  "372158000":"9388509",  // Marguerite Ace
+  "636022333":"9580907",  // Wild Rose Leader
+  "308688000":"9388569",  // Emerald Leader
+  "309905000":"9604936",  // Garnet Leader 2
+  "432716000":"9409340",  // Bishu Highway  ← YOUR SHIP confirmed E5 May 27
+  "431323000":"9409352",  // Cepheus Leader
+  "432988000":"9342882",  // Libra Leader
+  "431946000":"9342918",  // Leo Leader
+  "477816600":"9388595",  // Danube Highway
 };
 
 // Map delivery location names to detection leg
@@ -332,13 +358,14 @@ if(MMSI){
       for(var vi=0; vi<matches.length; vi++){
         var vm = matches[vi];
         if(!vm.mmsi) continue;
-        var berthOk = await verifyBerth(vm.mmsi, vm.imo||'', D, LEG);
+        var berthOk = await verifyBerth(vm.mmsi, vm.imo||VESSEL_IMO[vm.mmsi]||'', D, LEG);
         if(berthOk === false){
           process.stderr.write(vm.vessel+': NOT at '+LEG+' berth, removing\n');
           vm.europeScore = -1;
         } else if(berthOk === true){
           process.stderr.write(vm.vessel+': CONFIRMED at '+LEG+' berth ✅\n');
           vm.europeScore += 10;
+          vm.berthConfirmed = true;
         }
       }
       matches.sort(function(a,b){return (b.europeScore||0)-(a.europeScore||0);});
@@ -349,7 +376,11 @@ if(MMSI){
   result.total=rows.length;
   result.matches=matches;
   result.leg=LEG;
-  if(matches.length>0) result.mmsi=matches[0].mmsi;
+  if(matches.length>0){
+    result.mmsi=matches[0].mmsi;
+    // Pass berth_verified flag through so web.py can lock the detection
+    result.berth_verified = matches[0].berthConfirmed === true;
+  }
 }
 
 // Get position
