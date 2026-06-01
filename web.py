@@ -1027,7 +1027,7 @@ TRACKER_PAGE = BASE + """
           {% endif %}
           <span class="badge badge-{{ s }}" style="margin-top:5px;">{{ s }}</span>
           {% if step_name in step_dates %}
-            {% set days_gap = (order._days_tracked // [order._logins - 1, 1] | max) if order._logins > 1 else 99 %}
+            {% set days_gap = (order._days_tracked // (order._logins - 1 if order._logins > 1 else 1)) if order._logins > 1 else 99 %}
             {% if order._logins == 1 %}
               {% set rel_icon = '⚠️' %}
               {% set rel_label = 'Estimated' %}
@@ -1202,7 +1202,7 @@ TRACKER_PAGE = BASE + """
       {% if is_vessel and v in ['inTransit', 'notVisited'] %}
       {% set step_date = order._step_dates.leftTheFactory if leg_key == 'nagoya' else
                          order._step_dates.get(leg_key, {}) if order._step_dates else {} %}
-      {% set days_gap = (order._days_tracked // [order._logins - 1, 1] | max) if order._logins > 1 else 99 %}
+      {% set days_gap = (order._days_tracked // (order._logins - 1 if order._logins > 1 else 1)) if order._logins > 1 else 99 %}
       {% set date_reliable = order._logins >= 2 and days_gap <= 3 %}
       <div style="margin:6px 0 2px 44px;">
         <div style="display:flex;gap:6px;flex-wrap:wrap;">
@@ -1407,7 +1407,7 @@ TRACKER_PAGE = BASE + """
     var hash = "{{ order._order_hash if order._order_hash else '' }}";
     var hasUserDate = false;
     var hasKnownVessel = {{ 'true' if order._vessel_mmsi else 'false' }};
-    var loginGap = {{ ((order._days_tracked / ([order._logins - 1, 1]|max))|round(1)) if order._logins > 1 else 99 }};
+    var loginGap = {{ ((order._days_tracked / (order._logins - 1 if order._logins > 1 else 1))|round(1)) if order._logins > 1 else 99 }};
     var logins = {{ order._logins }};
 
     // Check if user entered a date in vessel_overrides (reliable)
