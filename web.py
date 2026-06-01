@@ -2256,8 +2256,9 @@ def api_vessel_detect(order_hash):
             """, (order_hash, mmsi)).fetchone()
             # Berth-verified vessels: never re-detect, only refresh position every 6h
             # Unverified vessels: re-detect after 6h (detection may have been wrong)
-            stale_identity = (not berth_verified) and age and age[0] > 6
-            stale_position = pos_age and pos_age[0] > 6
+            # NULL age (no timestamp yet) = treat as stale so it refreshes.
+            stale_identity = (not berth_verified) and (age is None or age[0] is None or age[0] > 6)
+            stale_position = (pos_age is None or pos_age[0] is None or pos_age[0] > 6)
 
             if not stale_identity:
                 # Serve from checks position cache if position is fresh
@@ -2304,7 +2305,7 @@ def api_vessel_detect(order_hash):
                     SELECT CAST((julianday('now') - julianday(vessel_updated)) * 24 AS INTEGER)
                     FROM checks WHERE order_hash=? AND vessel_mmsi IS NOT NULL LIMIT 1
                 """, (order_hash,)).fetchone()
-                stale = age and age[0] > 6
+                stale = (age is None or age[0] is None or age[0] > 6)
 
                 if not stale:
                     return jsonify({
