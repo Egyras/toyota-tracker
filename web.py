@@ -200,6 +200,11 @@ def get_db():
                 source        TEXT,
                 UNIQUE(order_hash, leg)
             );
+            CREATE TABLE IF NOT EXISTS order_names (
+                order_hash  TEXT PRIMARY KEY,
+                name        TEXT NOT NULL,
+                created_at  TEXT
+            );
             -- migrate: add created_on if upgrading from older schema
             CREATE TABLE IF NOT EXISTS _migrations (id INTEGER PRIMARY KEY);
         """)
@@ -298,6 +303,31 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True, created_o
             )
 
         _save_step_durations(db, order_hash, model, dest_country, steps, step_dates)
+
+        # Auto-assign friendly name if not already named
+        if order_hash:
+            existing_name = db.execute(
+                "SELECT name FROM order_names WHERE order_hash=?", (order_hash,)
+            ).fetchone()
+            if not existing_name:
+                code_map = {
+                    'DENMARK':'DK','FRANCE':'FR','GREECE':'GR','ITALY':'IT',
+                    'LITHUANIA':'LT','NORWAY':'NO','SLOVENIA':'SI','SPAIN':'ES',
+                    'SWEDEN':'SE','UNITED KINGDOM':'UK','PORTUGAL':'PT',
+                    'FINLAND':'FI','GERMANY':'DE','NETHERLANDS':'NL','BELGIUM':'BE',
+                    'AUSTRIA':'AT','SWITZERLAND':'CH','POLAND':'PL','CZECHIA':'CZ',
+                    'HUNGARY':'HU','ROMANIA':'RO','BULGARIA':'BG','CROATIA':'HR',
+                }
+                code = code_map.get(dest_country, 'XX')
+                count = db.execute(
+                    "SELECT COUNT(*) FROM order_names WHERE name LIKE ?", (code+'-%',)
+                ).fetchone()[0]
+                name = f"{code}-{count+1}"
+                db.execute(
+                    "INSERT OR IGNORE INTO order_names (order_hash, name, created_at) VALUES (?,?,datetime('now'))",
+                    (order_hash, name)
+                )
+
         db.commit()
     except Exception as e:
         print(f"[stats] save error: {e}", file=sys.stderr)
@@ -362,8 +392,10 @@ def get_stats_data():
     delayed      = db.execute("SELECT COUNT(DISTINCT order_hash) FROM checks WHERE is_delayed=1").fetchone()[0]
     damaged      = db.execute("SELECT COUNT(DISTINCT order_hash) FROM checks WHERE has_damage=1").fetchone()[0]
     recent = db.execute("""
-        SELECT c.ts, c.model, c.status, c.dest_country, c.order_hash
+        SELECT c.ts, c.model, c.status, c.dest_country, c.order_hash,
+               COALESCE(n.name, substr(c.order_hash,1,8)) as order_name
         FROM checks c
+        LEFT JOIN order_names n ON c.order_hash = n.order_hash
         INNER JOIN (
             SELECT order_hash, MAX(ts) ts FROM checks GROUP BY order_hash
         ) latest ON c.order_hash = latest.order_hash AND c.ts = latest.ts
@@ -1682,7 +1714,7 @@ STATS_PAGE = BASE + """
         <td><span class="badge badge-pending">{{ r['status'] or '—' }}</span></td>
         <td>{{ r['dest_country'] or '—' }}</td>
         <td style="font-family:monospace;font-size:11px;color:var(--muted);">
-          {{ r['order_hash'][:8] if r['order_hash'] else '—' }}
+          {{ r['order_name'] }}
         </td>
       </tr>
       {% endfor %}
