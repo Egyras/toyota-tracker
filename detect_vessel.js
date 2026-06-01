@@ -209,10 +209,15 @@ if(MMSI){
   var carriers = LEG === "nagoya" ? CARRIERS_LEG1 :
                  LEG === "zeebrugge" || LEG === "malmo" ? CARRIERS_LEG2 : CARRIERS_LEG1;
 
-  // Departure window: 8 days before the date (compensates for late logins + slow DB updates)
+  // Departure window logic (per forum research):
+  // - Ship leaves Nagoya E5 berth 1-2 days BEFORE leftTheFactory notification
+  // - But DB records leftTheFactory when user first logs in, which may be days AFTER the notification
+  // So real departure = D_date - login_gap - 2.
+  // We search: 2 days AFTER D (catches early logins) back to 7 days BEFORE D (catches late logins).
+  // Total window: D-7 to D+2 days, centred just before the recorded date.
   var lf=new Date(D+"T00:00:00Z");
-  var start=Math.floor((lf.getTime()-8*86400000)/1000);
-  var end=Math.floor(lf.getTime()/1000);
+  var start=Math.floor((lf.getTime()-7*86400000)/1000);
+  var end=Math.floor((lf.getTime()+2*86400000)/1000);
   var u="https://www.myshiptracking.com/ports-arrivals-departures/?mmsi=&pid="+pid+"&type=2&time="+start+"_"+end+"&pp=200";
   process.stderr.write("Port "+LEG+" (pid:"+pid+") URL: "+u+"\n");
   await pg.goto(u,{timeout:30000});
@@ -268,6 +273,16 @@ if(MMSI){
         await pg.waitForTimeout(3000);
         var vtext=await pg.textContent("body");
         m.europeScore=EUROPE.filter(function(p){return vtext.toUpperCase().includes(p);}).length;
+        // Extract IMO from vessel page while we have it open (needed for berth verification)
+        var imoMatch=vtext.match(/IMO[:\s#]*(\d{7})/i);
+        if(imoMatch) { m.imo=imoMatch[1]; process.stderr.write(m.vessel+": IMO="+m.imo+"\n"); }
+        // Also check last departure port — if vessel loaded at Kobe/Yokohama/etc instead of
+        // Nagoya, it's on a different route. Check for "ATD" (actual time of departure) from non-Nagoya
+        var lastDeptMatch=vtext.match(/ATD[^\n]*\n[^\n]*?(KOBE|YOKOHAMA|OSAKA|HIROSHIMA|NAGOYA)/i);
+        if(lastDeptMatch && lastDeptMatch[1].toUpperCase() !== 'NAGOYA'){
+          process.stderr.write(m.vessel+": last departure from "+lastDeptMatch[1]+" not Nagoya, penalizing -15\n");
+          m.europeScore -= 15;
+        }
         // Check live destination — Singapore/Suez ARE normal stops on Europe route.
         // Only penalise destinations that prove the vessel is on a non-Europe rotation:
         // Americas, Pacific, Australia, or returning to Japan from Europe.
@@ -317,7 +332,7 @@ if(MMSI){
       for(var vi=0; vi<matches.length; vi++){
         var vm = matches[vi];
         if(!vm.mmsi) continue;
-        var berthOk = await verifyBerth(vm.mmsi, '', D, LEG);
+        var berthOk = await verifyBerth(vm.mmsi, vm.imo||'', D, LEG);
         if(berthOk === false){
           process.stderr.write(vm.vessel+': NOT at '+LEG+' berth, removing\n');
           vm.europeScore = -1;
