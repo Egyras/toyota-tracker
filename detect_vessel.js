@@ -53,6 +53,8 @@ var TOYOTA_CARRIERS={
   "636022333":"Wild Rose Leader",
   "308688000":"Emerald Leader",
   "309905000":"Garnet Leader 2",
+  "432716000":"Bishu Highway",
+  "431323000":"Cepheus Leader",
 };
 
 // Map delivery location names to detection leg
@@ -78,29 +80,47 @@ var LOCATION_NAME_TO_LEG = {
 var E5_LAT_MIN = 35.04, E5_LAT_MAX = 35.06;
 var E5_LON_MIN = 136.87, E5_LON_MAX = 136.90;
 
-async function verifyE5Berth(mmsi, imo, departDate) {
-  // Check if vessel was at E5 berth within 5 days before departure
+// Zeebrugge Car Terminal (ZCT) coordinates
+// Confirmed from Wild Rose Leader, Elbe Highway, Garnet Leader 2 AIS data
+var ZCT_LAT_MIN = 51.295, ZCT_LAT_MAX = 51.315;
+var ZCT_LON_MIN = 3.215,  ZCT_LON_MAX = 3.240;
+
+// Malmö car terminal (Skandiahamnen) coordinates
+// Confirmed from Elbe Highway, Danube Highway AIS data
+var MALMO_LAT_MIN = 55.610, MALMO_LAT_MAX = 55.630;
+var MALMO_LON_MIN = 12.990, MALMO_LON_MAX = 13.015;
+
+async function verifyBerth(mmsi, imo, departDate, leg) {
   try {
-    var days = 60; // shipinfo.net free tier
-    var url = 'https://shipinfo.net/topos/api/vessel/track?days='+days+'&imo='+imo+'&mmsi='+mmsi;
+    var latMin, latMax, lonMin, lonMax;
+    if(leg === 'nagoya'){
+      latMin=E5_LAT_MIN; latMax=E5_LAT_MAX; lonMin=E5_LON_MIN; lonMax=E5_LON_MAX;
+    } else if(leg === 'zeebrugge'){
+      latMin=ZCT_LAT_MIN; latMax=ZCT_LAT_MAX; lonMin=ZCT_LON_MIN; lonMax=ZCT_LON_MAX;
+    } else if(leg === 'malmo'){
+      latMin=MALMO_LAT_MIN; latMax=MALMO_LAT_MAX; lonMin=MALMO_LON_MIN; lonMax=MALMO_LON_MAX;
+    } else {
+      return null; // no berth verification for other legs
+    }
+    var url = 'https://shipinfo.net/topos/api/vessel/track?days=60&imo='+imo+'&mmsi='+mmsi;
     var resp = await fetch(url);
     var data = await resp.json();
     var points = Array.isArray(data) ? data : (data.data || data.points || []);
     var lf = new Date(departDate+'T00:00:00Z');
     var window_start = new Date(lf.getTime() - 7*86400000);
-    var e5hits = points.filter(function(p){
+    var hits = points.filter(function(p){
       if(!p.lat || !p.lng) return false;
       var t = new Date(p.updated);
       return t >= window_start && t <= lf &&
-             E5_LAT_MIN <= p.lat && p.lat <= E5_LAT_MAX &&
-             E5_LON_MIN <= p.lng && p.lng <= E5_LON_MAX &&
-             (p.speed_kn||0) === 0;
+             latMin <= p.lat && p.lat <= latMax &&
+             lonMin <= p.lng && p.lng <= lonMax &&
+             (p.speed_kn||0) <= 1;
     });
-    process.stderr.write('E5 berth check for '+mmsi+': '+e5hits.length+' hits\n');
-    return e5hits.length > 0;
+    process.stderr.write('Berth check ('+leg+') for '+mmsi+': '+hits.length+' hits\n');
+    return hits.length > 0;
   } catch(e) {
-    process.stderr.write('E5 check failed: '+e.message+'\n');
-    return null; // null = unknown, don't reject
+    process.stderr.write('Berth check failed: '+e.message+'\n');
+    return null;
   }
 }
 
@@ -208,7 +228,23 @@ if(MMSI){
   });
 
   var C=carriers;
-  var matches=rows.filter(function(r){return C.some(function(c){return r.vessel.toUpperCase().indexOf(c)>=0;});});
+  var knownMMSIs=Object.keys(TOYOTA_CARRIERS);
+  // Primary filter: carrier name keywords OR known MMSI
+  // Fallback for nagoya/zeebrugge: also include any RoRo vessel (berth will verify)
+  var matches=rows.filter(function(r){
+    if(knownMMSIs.indexOf(r.mmsi)>=0) return true; // known Toyota carrier
+    if(C.some(function(c){return r.vessel.toUpperCase().indexOf(c)>=0;})) return true;
+    // For berth-verified legs: include all large vessels as candidates
+    // (berth check will reject non-Toyota vessels)
+    if(LEG==='nagoya'||LEG==='zeebrugge'||LEG==='malmo'){
+      var roro=['RO-RO','RORO','CAR CARRIER','VEHICLE','PCC'];
+      // We can't check vessel type from port list, so keep name filter
+      // but add common Toyota carrier patterns
+      if(/\b(ACE|LEADER|HIGHWAY|MORNING|TOREADOR|TRIUMPH|SPIRIT|BRAVE)\b/i.test(r.vessel)) return true;
+    }
+    return false;
+  });
+  process.stderr.write('Name filter: '+matches.length+' matches from '+rows.length+' total\n');
 
   // Always score ALL matches by Europe port history — even single match
   // This prevents false positives from carriers going to Americas/Asia/Pacific
@@ -236,19 +272,18 @@ if(MMSI){
       process.stderr.write("Best match "+matches[0].vessel+" europeScore=0, rejecting — not Europe route\n");
       matches=[];
     }
-    // For Nagoya leg: verify vessel was at E5 berth (35.04-35.06N, 136.87-136.90E)
-    if(LEG === 'nagoya' && matches.length > 0){
+    // For nagoya, zeebrugge and malmo legs: verify vessel was at correct berth
+    if((LEG === 'nagoya' || LEG === 'zeebrugge' || LEG === 'malmo') && matches.length > 0){
       for(var vi=0; vi<matches.length; vi++){
         var vm = matches[vi];
         if(!vm.mmsi) continue;
-        // Try to get IMO from TOYOTA_CARRIERS lookup or skip
-        var e5ok = await verifyE5Berth(vm.mmsi, '', D);
-        if(e5ok === false){
-          process.stderr.write(vm.vessel+': NOT at E5 berth, removing\n');
-          vm.europeScore = -1; // demote
-        } else if(e5ok === true){
-          process.stderr.write(vm.vessel+': CONFIRMED at E5 berth ✅\n');
-          vm.europeScore += 10; // boost
+        var berthOk = await verifyBerth(vm.mmsi, '', D, LEG);
+        if(berthOk === false){
+          process.stderr.write(vm.vessel+': NOT at '+LEG+' berth, removing\n');
+          vm.europeScore = -1;
+        } else if(berthOk === true){
+          process.stderr.write(vm.vessel+': CONFIRMED at '+LEG+' berth ✅\n');
+          vm.europeScore += 10;
         }
       }
       matches.sort(function(a,b){return (b.europeScore||0)-(a.europeScore||0);});
