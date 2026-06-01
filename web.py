@@ -472,10 +472,12 @@ def _save_step_durations(db, order_hash, model, dest_country, steps, step_dates)
             entered = dates.get("current")   # date we first saw it as current
             left    = dates.get("visited")   # date we first saw it as visited
 
-            # Only mark observed=1 if we have BOTH dates
-            # (meaning we logged in when current, then again when visited)
-            observed = 1 if (entered and left) else 0
-            dur      = days_between(entered, left) if observed else None
+            # observed=1: we saw BOTH current and visited across separate logins — reliable
+            # observed=0: step already completed when user first logged in — less reliable
+            observed = 1 if (entered and left and entered != left) else 0
+            # Always calculate duration when both dates exist, even if observed=0
+            # (useful for statistics with relaxed filters)
+            dur = days_between(entered, left) if (entered and left) else None
 
             # Use whichever date we have for date_entered
             date_entered = entered or left
@@ -487,7 +489,7 @@ def _save_step_durations(db, order_hash, model, dest_country, steps, step_dates)
                 VALUES (?,?,?,?,?,?,?,?)
                 ON CONFLICT(order_hash, step) DO UPDATE SET
                   date_left      = COALESCE(excluded.date_left, date_left),
-                  duration_days  = excluded.duration_days,
+                  duration_days  = COALESCE(excluded.duration_days, duration_days),
                   observed       = MAX(observed, excluded.observed)
             """, (order_hash, step, model, dest_country,
                   date_entered, left, dur, observed))
@@ -557,8 +559,8 @@ def get_stats_data():
         WHERE sd.duration_days IS NOT NULL
           AND sd.duration_days >= 0
           AND sd.observed = 1
-          -- Only trust data from users who checked at least every 3 days on average
-          AND freq.avg_gap <= 3
+          -- Only trust data from users who checked at least every 7 days on average
+          AND freq.avg_gap <= 7
           -- Must have logged in at least twice
           AND freq.logins >= 2
         GROUP BY sd.step
@@ -614,7 +616,7 @@ def get_stats_data():
           AND c.created_on IS NOT NULL
           AND julianday(sd_build.date_entered) > julianday(sd_proc.date_entered)
           AND julianday(sd_build.date_entered) > julianday(c.created_on)
-          AND freq.avg_gap <= 3
+          AND freq.avg_gap <= 7
           AND freq.logins >= 2
     """).fetchone()
     countries = db.execute(
