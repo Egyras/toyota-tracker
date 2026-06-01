@@ -200,6 +200,20 @@ def get_db():
                 observed      INTEGER DEFAULT 0,
                 UNIQUE(order_hash, step)
             );
+            CREATE TABLE IF NOT EXISTS hub_legs (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_hash    TEXT NOT NULL,
+                from_hub      TEXT NOT NULL,
+                to_hub        TEXT NOT NULL,
+                leg_key       TEXT NOT NULL,  -- e.g. "nagoya->zeebrugge"
+                model         TEXT,
+                dest_country  TEXT,
+                date_departed TEXT,  -- when from_hub became visited
+                date_arrived  TEXT,  -- when to_hub became visited/inTransit
+                duration_days INTEGER,
+                observed      INTEGER DEFAULT 0,  -- 1 = both dates from separate logins
+                UNIQUE(order_hash, leg_key)
+            );
             CREATE TABLE IF NOT EXISTS vessel_overrides (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 order_hash    TEXT NOT NULL,
@@ -232,6 +246,7 @@ def get_db():
         vo_cols = [r[1] for r in db.execute("PRAGMA table_info(vessel_overrides)").fetchall()]
         if 'berth_verified' not in vo_cols:
             db.execute("ALTER TABLE vessel_overrides ADD COLUMN berth_verified INTEGER DEFAULT 0")
+        # hub_legs table created by executescript above if not exists
         # Vessel tracking columns
         for col in ['vessel_mmsi','vessel_name','vessel_lat','vessel_lon',
                     'vessel_speed','vessel_course','vessel_dest','vessel_updated']:
@@ -397,6 +412,11 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True, created_o
                         (created_on[:10], order_hash)
                     )
                 _save_step_durations(db, order_hash, model, dest_country, steps, step_dates)
+                _save_hub_legs(db, order_hash, model, dest_country,
+                               [{"loc":d.get("locationName"),"country":d.get("countryName"),
+                                 "type":d.get("destinationType"),"visited":d.get("isVisited")}
+                                for d in (order.get("intermediateDeliveries") or [])],
+                               step_dates)
                 db.commit()
                 return
 
@@ -427,6 +447,11 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True, created_o
             )
 
         _save_step_durations(db, order_hash, model, dest_country, steps, step_dates)
+        _save_hub_legs(db, order_hash, model, dest_country,
+                       [{"loc":d.get("locationName"),"country":d.get("countryName"),
+                         "type":d.get("destinationType"),"visited":d.get("isVisited")}
+                        for d in deliveries],
+                       step_dates)
 
         # Auto-assign friendly name if not already named
         if order_hash:
@@ -505,6 +530,124 @@ def _save_step_durations(db, order_hash, model, dest_country, steps, step_dates)
                 ON CONFLICT(order_hash, step) DO NOTHING
             """, (order_hash, step_name, model, dest_country))
 
+def _normalize_hub(loc: str) -> str:
+    """Normalize delivery location name to a short hub key."""
+    loc = (loc or "").lower()
+    if "toyota city" in loc or "aichi" in loc: return "Nagoya"
+    if "zeebrugge" in loc:   return "Zeebrugge"
+    if "bremerhaven" in loc: return "Bremerhaven"
+    if "southampton" in loc: return "Southampton"
+    if "portbury" in loc or "bristol" in loc: return "Portbury"
+    if "sagunto" in loc:     return "Sagunto"
+    if "livorno" in loc:     return "Livorno"
+    if "malmö" in loc or "malmo" in loc: return "Malmö"
+    if "gothenburg" in loc or "göteborg" in loc: return "Gothenburg"
+    if "paldiski" in loc:    return "Paldiski"
+    if "drammen" in loc:     return "Drammen"
+    if "piraeus" in loc:     return "Piraeus"
+    if "kotka" in loc:       return "Kotka"
+    if "varna" in loc:       return "Varna"
+    if "koper" in loc:       return "Koper"
+    return None  # destination/truck legs — skip
+
+def _save_hub_legs(db, order_hash: str, model: str, dest_country: str,
+                   deliveries: list, step_dates: dict):
+    """
+    Record port-to-port leg durations from delivery hub visit dates.
+    
+    We use the step_dates JSON which records when each delivery stop
+    changed status. For vessel legs (FACTORY→HUB or HUB→HUB), when
+    both the departure hub (visited) and arrival hub (inTransit/visited)
+    have dates from SEPARATE logins, we record an observed leg duration.
+    """
+    if not order_hash or not deliveries:
+        return
+
+    # Build list of vessel hubs in order (skip truck legs to final dest)
+    vessel_hubs = []
+    for d in deliveries:
+        if d.get("type") in ("FACTORY", "HUB", "TRANSIT") and            d.get("visited") != "notVisited":
+            hub = _normalize_hub(d.get("loc", ""))
+            if hub:
+                vessel_hubs.append({
+                    "hub":     hub,
+                    "visited": d.get("visited"),
+                    "loc":     d.get("loc", ""),
+                })
+
+    if len(vessel_hubs) < 2:
+        return
+
+    # Get dates from step_dates for hub transitions
+    # step_dates structure: {"steps": {"leftTheFactory": {"current": "2026-05-15", "visited": "2026-05-29"}}}
+    steps = step_dates.get("steps", {}) if step_dates else {}
+    lf = steps.get("leftTheFactory", {})
+    it = steps.get("inTransit", {})
+
+    # Map: Nagoya departure = leftTheFactory.visited (when it left visited status)
+    # Hub arrival = inTransit.current (when inTransit was first seen)
+    # Hub departure = inTransit.visited (when inTransit became visited)
+    hub_dates = {
+        "Nagoya": {
+            "departed": lf.get("visited") or lf.get("current"),
+        }
+    }
+
+    # For now we track Nagoya → first European hub (the deep sea leg)
+    # This is the most valuable stat — ~25-38 days depending on route
+    if len(vessel_hubs) >= 2:
+        from_hub = vessel_hubs[0]["hub"]  # Nagoya
+        to_hub   = vessel_hubs[1]["hub"]  # Zeebrugge/Sagunto/etc
+
+        departed = hub_dates.get(from_hub, {}).get("departed")
+        # Arrival = when inTransit first seen (car arrived at European hub)
+        arrived  = it.get("current") or it.get("visited")
+
+        if departed and arrived:
+            try:
+                dur = (datetime.strptime(arrived, "%Y-%m-%d") -
+                       datetime.strptime(departed, "%Y-%m-%d")).days
+                # Only meaningful if positive and realistic (15-60 days for sea voyage)
+                if 15 <= dur <= 60:
+                    leg_key = f"{from_hub.lower()}->{to_hub.lower()}"
+                    # observed=1 only if the two dates came from different logins
+                    # (departed from leftTheFactory.visited, arrived from inTransit.current
+                    #  and they are different dates = must be separate logins)
+                    observed = 1 if departed != arrived else 0
+                    db.execute("""
+                        INSERT INTO hub_legs
+                          (order_hash, from_hub, to_hub, leg_key, model, dest_country,
+                           date_departed, date_arrived, duration_days, observed)
+                        VALUES (?,?,?,?,?,?,?,?,?,?)
+                        ON CONFLICT(order_hash, leg_key) DO UPDATE SET
+                          date_arrived  = COALESCE(excluded.date_arrived, date_arrived),
+                          duration_days = excluded.duration_days,
+                          observed      = MAX(observed, excluded.observed)
+                    """, (order_hash, from_hub, to_hub, leg_key, model, dest_country,
+                          departed, arrived, dur, observed))
+            except Exception as e:
+                print(f"[hub_legs] {e}", file=__import__('sys').stderr)
+
+    # Zeebrugge → Malmö leg (feeder)
+    # Use vessel_overrides for zeebrugge visited date vs malmo inTransit date
+    # This will be populated as more users pass through the feeder legs
+    # For now, record what we can from deliveries isVisited status changes
+    for i in range(1, len(vessel_hubs) - 1):
+        fh = vessel_hubs[i]
+        th = vessel_hubs[i+1]
+        if fh["visited"] == "visited" and th["visited"] in ("visited", "inTransit"):
+            from_hub = fh["hub"]
+            to_hub   = th["hub"]
+            leg_key  = f"{from_hub.lower()}->{to_hub.lower()}"
+            # We don't have exact dates for feeder legs yet from step_dates
+            # Just record the leg exists for this order (no duration)
+            db.execute("""
+                INSERT INTO hub_legs (order_hash, from_hub, to_hub, leg_key, model, dest_country)
+                VALUES (?,?,?,?,?,?)
+                ON CONFLICT(order_hash, leg_key) DO NOTHING
+            """, (order_hash, from_hub, to_hub, leg_key, model, dest_country))
+
+
 def get_stats_data():
     db    = get_db()
     total = db.execute("SELECT COUNT(DISTINCT order_hash) FROM checks WHERE order_hash IS NOT NULL").fetchone()[0]
@@ -540,14 +683,22 @@ def get_stats_data():
                ROUND(AVG(sd.duration_days),1) avg_days,
                MIN(sd.duration_days) min_days,
                MAX(sd.duration_days) max_days,
-               SUM(sd.observed) observed_count
+               SUM(sd.observed) observed_count,
+               CASE
+                 WHEN c.dest_country IN ('ITALY','SPAIN','FRANCE','GREECE','SLOVENIA','CROATIA','PORTUGAL')
+                   THEN 'Mediterranean'
+                 WHEN c.dest_country IN ('LITHUANIA','LATVIA','ESTONIA','FINLAND','SWEDEN','NORWAY','DENMARK','POLAND')
+                   THEN 'Nordic/Baltic'
+                 ELSE 'Western Europe'
+               END route
         FROM step_durations sd
-        -- Only include orders where login frequency was good
+        JOIN (
+            SELECT order_hash, MAX(ts) ts FROM checks GROUP BY order_hash
+        ) latest ON sd.order_hash = latest.order_hash
+        JOIN checks c ON c.order_hash = latest.order_hash AND c.ts = latest.ts
         JOIN (
             SELECT order_hash,
                    COUNT(*) logins,
-                   CAST(julianday(MAX(ts)) - julianday(MIN(ts)) AS INTEGER) days_tracked,
-                   -- avg days between logins (lower = more frequent)
                    CASE
                      WHEN COUNT(*) <= 1 THEN 99
                      ELSE CAST(julianday(MAX(ts)) - julianday(MIN(ts)) AS REAL) / (COUNT(*) - 1)
@@ -559,12 +710,10 @@ def get_stats_data():
         WHERE sd.duration_days IS NOT NULL
           AND sd.duration_days >= 0
           AND sd.observed = 1
-          -- Only trust data from users who checked at least every 7 days on average
           AND freq.avg_gap <= 7
-          -- Must have logged in at least twice
           AND freq.logins >= 2
-        GROUP BY sd.step
-        ORDER BY sd.step
+        GROUP BY sd.step, route
+        ORDER BY sd.step, route
     """).fetchall()
     step_current = db.execute("""
         SELECT sd.step,
@@ -677,12 +826,32 @@ def get_stats_data():
         LIMIT 20
     """).fetchall()
 
+    hub_leg_stats = db.execute("""
+        SELECT leg_key, from_hub, to_hub,
+               COUNT(*) samples,
+               SUM(observed) observed_count,
+               ROUND(AVG(CASE WHEN observed=1 THEN duration_days END), 1) avg_days,
+               MIN(CASE WHEN observed=1 THEN duration_days END) min_days,
+               MAX(CASE WHEN observed=1 THEN duration_days END) max_days
+        FROM hub_legs
+        WHERE duration_days IS NOT NULL AND duration_days > 0
+        GROUP BY leg_key
+        ORDER BY
+          CASE from_hub
+            WHEN 'Nagoya' THEN 1 WHEN 'Zeebrugge' THEN 2
+            WHEN 'Bremerhaven' THEN 2 WHEN 'Southampton' THEN 2
+            WHEN 'Sagunto' THEN 2 WHEN 'Livorno' THEN 2
+            WHEN 'Malmo' THEN 3 WHEN 'Malmö' THEN 3
+            WHEN 'Gothenburg' THEN 3 ELSE 4
+          END, leg_key
+    """).fetchall()
+
     return dict(total=total, by_model=by_model, by_status=by_status,
                 by_country=by_country, delayed=delayed, damaged=damaged,
                 recent=recent, step_avgs=step_avgs, step_current=step_current,
                 countries=countries, order_dates=order_dates,
                 order_journeys=order_journeys, order_to_build=order_to_build,
-                login_freq=login_freq)
+                login_freq=login_freq, hub_leg_stats=hub_leg_stats)
 
 # ── Templates ─────────────────────────────────────────────────────────────────
 
@@ -1662,6 +1831,11 @@ STATS_PAGE = BASE + """
         <div class="bar-head">
           <div style="display:flex;align-items:center;gap:8px;">
             <span>{{ r['step'] }}</span>
+            {% if r['route'] %}
+            <span style="background:rgba(139,148,158,0.15);border:1px solid rgba(139,148,158,0.3);
+                         border-radius:10px;padding:1px 6px;font-size:9px;color:var(--muted);
+                         font-weight:500;">{{ r['route'] }}</span>
+            {% endif %}
             <span style="background:{{ rel_bg }};border:1px solid {{ rel_border }};
                          border-radius:10px;padding:1px 7px;font-size:10px;
                          color:{{ rel_color }};font-weight:500;white-space:nowrap;">{{ rel_label }}</span>
@@ -1721,6 +1895,61 @@ STATS_PAGE = BASE + """
       <span style="color:#e3b341;">~ Early data</span> = 2-4 orders ·
       <span style="color:#3fb950;">✓ Reliable</span> = 5+ orders
     </div>
+  </div>
+
+  <div class="card">
+    <div class="section-head">🚢 Port-to-port leg durations</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:1rem;">
+      How long each shipping leg takes — based on orders where we observed both departure and arrival.
+    </div>
+    {% if hub_leg_stats %}
+    <table class="data-table">
+      <tr>
+        <th>Leg</th>
+        <th>Avg days</th>
+        <th>Min / Max</th>
+        <th>Orders</th>
+      </tr>
+      {% for r in hub_leg_stats %}
+      {% if r['avg_days'] %}
+      <tr>
+        <td>
+          <span style="font-weight:500;">{{ r['from_hub'] }}</span>
+          <span style="color:var(--muted);margin:0 4px;">→</span>
+          <span style="font-weight:500;">{{ r['to_hub'] }}</span>
+          <span style="font-size:10px;color:var(--muted);margin-left:6px;">
+            {% if 'nagoya' in r['leg_key'] %}🌊 deep sea
+            {% elif r['from_hub'] in ['Zeebrugge','Bremerhaven','Southampton','Sagunto','Livorno'] %}⚓ feeder
+            {% else %}🚛 feeder{% endif %}
+          </span>
+        </td>
+        <td style="font-weight:600;color:var(--text);">~{{ r['avg_days'] }} days</td>
+        <td style="color:var(--muted);font-size:12px;">{{ r['min_days'] }} / {{ r['max_days'] }}</td>
+        <td>
+          <span style="font-size:11px;color:var(--muted);">{{ r['samples'] }}</span>
+          {% if r['observed_count'] >= 5 %}
+          <span style="background:rgba(63,185,80,0.15);border:1px solid rgba(63,185,80,0.3);
+                       border-radius:10px;padding:1px 6px;font-size:9px;color:#3fb950;
+                       font-weight:500;margin-left:4px;">✓ Reliable</span>
+          {% elif r['observed_count'] >= 2 %}
+          <span style="background:rgba(227,179,65,0.15);border:1px solid rgba(227,179,65,0.3);
+                       border-radius:10px;padding:1px 6px;font-size:9px;color:#e3b341;
+                       font-weight:500;margin-left:4px;">~ Early data</span>
+          {% else %}
+          <span style="background:rgba(229,0,26,0.08);border:1px solid rgba(229,0,26,0.25);
+                       border-radius:10px;padding:1px 6px;font-size:9px;color:var(--red);
+                       font-weight:500;margin-left:4px;">⚠ 1 sample</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endif %}
+      {% endfor %}
+    </table>
+    {% else %}
+    <p style="color:var(--muted);font-size:13px;">
+      No leg data yet — will populate as cars arrive at European ports and users log in.
+    </p>
+    {% endif %}
   </div>
 
   <div class="card">
