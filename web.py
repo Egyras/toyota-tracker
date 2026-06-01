@@ -362,7 +362,7 @@ def get_stats_data():
     delayed      = db.execute("SELECT COUNT(DISTINCT order_hash) FROM checks WHERE is_delayed=1").fetchone()[0]
     damaged      = db.execute("SELECT COUNT(DISTINCT order_hash) FROM checks WHERE has_damage=1").fetchone()[0]
     recent = db.execute("""
-        SELECT c.ts, c.model, c.status, c.dest_country
+        SELECT c.ts, c.model, c.status, c.dest_country, c.order_hash
         FROM checks c
         INNER JOIN (
             SELECT order_hash, MAX(ts) ts FROM checks GROUP BY order_hash
@@ -1674,13 +1674,16 @@ STATS_PAGE = BASE + """
   <div class="card">
     <div class="section-head">🕐 Recent checks</div>
     <table class="data-table">
-      <tr><th>Time (local)</th><th>Model</th><th>Status</th><th>Country</th></tr>
+      <tr><th>Time (local)</th><th>Model</th><th>Status</th><th>Country</th><th>Order ID</th></tr>
       {% for r in recent %}
       <tr>
         <td class="utc-time" data-utc="{{ r['ts'][:16] }}" style="color:var(--muted);">{{ r['ts'][:16] | replace('T',' ') }}</td>
         <td>{{ r['model'] or '—' }}</td>
         <td><span class="badge badge-pending">{{ r['status'] or '—' }}</span></td>
         <td>{{ r['dest_country'] or '—' }}</td>
+        <td style="font-family:monospace;font-size:11px;color:var(--muted);">
+          {{ r['order_hash'][:8] if r['order_hash'] else '—' }}
+        </td>
       </tr>
       {% endfor %}
     </table>
