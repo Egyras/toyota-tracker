@@ -374,6 +374,36 @@ if(MMSI){
             m.liveDest = liveDest;
           }
         } catch(e) { process.stderr.write("Live dest check failed for "+m.vessel+": "+e.message+"\n"); }
+
+        // GEOGRAPHIC SANITY CHECK — current position proves route direction.
+        // A Europe-bound ship from Nagoya heads SOUTH/SOUTHWEST (toward Singapore).
+        // If it is east of ~141E, or north of Japan, or in the Americas/E.Pacific,
+        // it is physically NOT on the Europe voyage this rotation — hard reject.
+        // (This catches ships like Equuleus Leader that loaded at E5 but then
+        //  departed on a Pacific rotation instead of sailing to Europe.)
+        try {
+          var posData = await getShipinfoPosition(m.mmsi, VESSEL_IMO[m.mmsi]||'');
+          if(posData && posData.lat != null && posData.lon != null){
+            var plat = posData.lat, plon = posData.lon;
+            m.curLat = plat; m.curLon = plon;
+            process.stderr.write(m.vessel+": current pos lat="+plat.toFixed(2)+" lon="+plon.toFixed(2)+"\n");
+            var offRoute = false, reason = "";
+            // East Pacific / Americas (western hemisphere away from Europe approach)
+            if(plon < -30 && plon > -170){ offRoute = true; reason = "Americas/E.Pacific"; }
+            // West/Central Pacific east of Japan (heading away from Singapore)
+            else if(plon > 141 && plon < 200){ offRoute = true; reason = "Pacific (east of Japan)"; }
+            else if(plon < -170 || plon > 200){ offRoute = true; reason = "Mid-Pacific"; }
+            // Far north (Sea of Okhotsk / north Pacific rotations)
+            else if(plat > 46 && plon > 135){ offRoute = true; reason = "North Pacific/Okhotsk"; }
+            // China coast north of Shanghai heading into Yellow Sea/Bohai (China routes)
+            else if(plat > 32 && plon >= 117 && plon <= 127){ offRoute = true; reason = "Yellow Sea/China coast"; }
+            if(offRoute){
+              process.stderr.write(m.vessel+": OFF-ROUTE position ("+reason+"), hard reject -50\n");
+              m.europeScore -= 50;
+            }
+          }
+        } catch(e){ process.stderr.write("Position check failed for "+m.vessel+": "+e.message+"\n"); }
+
         process.stderr.write(m.vessel+": europeScore="+m.europeScore+"\n");
       }catch(e){ m.europeScore=0; }
     }
