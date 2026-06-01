@@ -1249,9 +1249,11 @@ TRACKER_PAGE = BASE + """
   (function(){
     var stops = [
       {% for d in delivs %}
+      {% if d.locationLatitude and d.locationLongitude %}
       {lat:{{ d.locationLatitude }},lng:{{ d.locationLongitude }},
-       name:"{{ d.locationName }}, {{ d.countryName }}",
+       name:"{{ (d.locationName or '') | replace('"','') }}, {{ d.countryName }}",
        type:"{{ d.destinationType }}",visited:"{{ d.isVisited }}"}{% if not loop.last %},{% endif %}
+      {% endif %}
       {% endfor %}
     ];
     var map = L.map('route-map',{zoomControl:true,scrollWheelZoom:false});
@@ -1325,7 +1327,7 @@ TRACKER_PAGE = BASE + """
     var hash = "{{ order._order_hash if order._order_hash else '' }}";
     var hasUserDate = false;
     var hasKnownVessel = {{ 'true' if order._vessel_mmsi else 'false' }};
-    var loginGap = {{ ((order._days_tracked / [order._logins - 1, 1]|max)|round(1)) if order._logins > 1 else 99 }};
+    var loginGap = {{ ((order._days_tracked / ([order._logins - 1, 1]|max))|round(1)) if order._logins > 1 else 99 }};
     var logins = {{ order._logins }};
 
     // Check if user entered a date in vessel_overrides (reliable)
