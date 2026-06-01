@@ -1251,8 +1251,8 @@ TRACKER_PAGE = BASE + """
       {% for d in delivs %}
       {% if d.locationLatitude and d.locationLongitude %}
       {lat:{{ d.locationLatitude }},lng:{{ d.locationLongitude }},
-       name:"{{ (d.locationName or '') | replace('"','') }}, {{ d.countryName }}",
-       type:"{{ d.destinationType }}",visited:"{{ d.isVisited }}"}{% if not loop.last %},{% endif %}
+       name:"{{ (d.locationName or '') | replace('"','\\"') }}, {{ d.countryName or '' }}",
+       type:"{{ d.destinationType or '' }}",visited:"{{ d.isVisited }}"},
       {% endif %}
       {% endfor %}
     ];
@@ -1261,7 +1261,9 @@ TRACKER_PAGE = BASE + """
       attribution:'&copy; OpenStreetMap &copy; CARTO',maxZoom:18
     }).addTo(map);
     var latlngs = stops.map(function(s){return[s.lat,s.lng];});
-    L.polyline(latlngs,{color:'#e5001a',weight:2,dashArray:'6 6',opacity:.7}).addTo(map);
+    if(latlngs.length > 1){
+      L.polyline(latlngs,{color:'#e5001a',weight:2,dashArray:'6 6',opacity:.7}).addTo(map);
+    }
     stops.forEach(function(s){
       var color = s.visited==='visited'?'#3fb950':s.visited==='inTransit'?'#e5001a':'#8b949e';
       var icon = L.divIcon({
@@ -1272,7 +1274,11 @@ TRACKER_PAGE = BASE + """
       L.marker([s.lat,s.lng],{icon:icon}).addTo(map)
        .bindPopup('<b>'+s.name+'</b><br>'+s.type);
     });
-    map.fitBounds(latlngs,{padding:[30,30]});
+    if(latlngs.length > 0){
+      map.fitBounds(latlngs,{padding:[30,30]});
+    } else {
+      map.setView([50,10],4);
+    }
 
     // Show vessel only while car is actively at sea
     // Stop tracking once car left port depot (now on truck to dealer)
