@@ -1595,7 +1595,7 @@ TRACKER_PAGE = BASE + """
           '<small style="color:#aaa">MMSI: '+mmsi+'</small>'
         );
       // Extend map bounds to include vessel
-      var bounds = L.latLngBounds(latlngs);
+      var bounds = latlngs.length > 0 ? L.latLngBounds(latlngs) : L.latLngBounds([[lat,lng],[lat,lng]]);
       bounds.extend([lat, lng]);
       map.fitBounds(bounds, {padding:[30,30]});
       // Add pulsing circle around vessel
