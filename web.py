@@ -1590,7 +1590,7 @@ TRACKER_PAGE = BASE + """
       vesselMarker = L.marker([lat,lng],{icon:icon,zIndexOffset:1000}).addTo(map)
         .bindPopup(
           '<b>'+name+'</b><br>'+
-          'Speed: '+speed+' kn · Course: '+course+'°<br>'+
+          'Speed: '+speed+' kn'+((course!==null&&course!==undefined&&course!==0&&course!=='')?' · Course: '+course+'°':'')+'<br>'+
           (dest?'Dest: '+dest+'<br>':'')+
           '<small style="color:#aaa">MMSI: '+mmsi+'</small>'
         );
@@ -2272,7 +2272,7 @@ def api_vessel_detect(order_hash):
                         "lat":         float(cached["vessel_lat"]),
                         "lon":         float(cached["vessel_lon"]),
                         "speed":       float(cached["vessel_speed"] or 0),
-                        "course":      float(cached["vessel_course"] or 0),
+                        "course":      (float(cached["vessel_course"]) if cached["vessel_course"] not in (None, 0, 0.0) else None),
                         "destination": cached["vessel_dest"] or "",
                         "cached":      True, "leg": leg_override,
                         "berth_verified": bool(berth_verified),
@@ -2310,7 +2310,7 @@ def api_vessel_detect(order_hash):
                         "lat":         float(cached["vessel_lat"]),
                         "lon":         float(cached["vessel_lon"]),
                         "speed":       float(cached["vessel_speed"] or 0),
-                        "course":      float(cached["vessel_course"] or 0),
+                        "course":      (float(cached["vessel_course"]) if cached["vessel_course"] not in (None, 0, 0.0) else None),
                         "destination": cached["vessel_dest"] or "",
                         "cached":      True,
                     })
@@ -2325,7 +2325,7 @@ def api_vessel_detect(order_hash):
                         "lat":         float(cached["vessel_lat"]),
                         "lon":         float(cached["vessel_lon"]),
                         "speed":       float(cached["vessel_speed"] or 0),
-                        "course":      float(cached["vessel_course"] or 0),
+                        "course":      (float(cached["vessel_course"]) if cached["vessel_course"] not in (None, 0, 0.0) else None),
                         "destination": cached["vessel_dest"] or "",
                         "cached":      True, "stale": True,
                     })
@@ -2365,7 +2365,11 @@ def api_vessel_detect(order_hash):
             detected_name  = excluded.detected_name,
             detected_at    = excluded.detected_at,
             source         = CASE WHEN mmsi IS NOT NULL THEN 'user' ELSE 'auto' END,
-            berth_verified = MAX(berth_verified, excluded.berth_verified)
+            berth_verified = CASE
+                WHEN vessel_overrides.detected_mmsi = excluded.detected_mmsi
+                    THEN MAX(vessel_overrides.berth_verified, excluded.berth_verified)
+                ELSE excluded.berth_verified
+            END
     """, (order_hash, leg_override, left_factory_date,
           vessel.get('mmsi'), vessel.get('name'), bv))
 

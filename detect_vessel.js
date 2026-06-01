@@ -214,7 +214,7 @@ function getShipFinderPosition(mmsi) {
           resolve({
             lat: lat, lon: lon,
             speed: spdM ? parseFloat(spdM[1]) : 0,
-            course: crsM ? parseFloat(crsM[1]) : 0,
+            course: crsM ? parseFloat(crsM[1]) : null,
             dest: dstM ? dstM[1].trim() : null,
             updated: updM ? updM[1] : null,
             source: 'shipfinder'
@@ -471,6 +471,7 @@ async function getShipinfoPosition(mmsi, imo){
     return {
       lat: last.lat, lon: last.lng,
       speed: last.speed_kn != null ? last.speed_kn : null,
+      course: (last.course != null ? last.course : (last.heading != null ? last.heading : null)),
       ageMin: ageMin, source: 'shipinfo'
     };
   } catch(e) {
@@ -512,6 +513,7 @@ if(result.mmsi){
       process.stderr.write("shipinfo fresher ("+siPos.ageMin+"min vs "+ageMin+"min)\n");
       result.position=Object.assign({}, result.position, {
         lat:siPos.lat, lon:siPos.lon, speed:siPos.speed,
+        course:(siPos.course != null ? siPos.course : result.position.course),
         ageMin:siPos.ageMin, source:"shipinfo"
       });
       ageMin = siPos.ageMin;
