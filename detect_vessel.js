@@ -10,7 +10,8 @@ const DEST_COUNTRY=(process.argv[5]||"").toUpperCase();  // order destination co
 function destRegion(country){
   if(!country) return null;
   if(/^(LITHUANIA|LATVIA|ESTONIA|FINLAND|SWEDEN|NORWAY|DENMARK|POLAND|GERMANY|BELGIUM|NETHERLANDS|UNITED KINGDOM|IRELAND|UK)$/i.test(country)) return "NORTHERN";
-  if(/^(FRANCE|ITALY|SPAIN|GREECE|PORTUGAL|CYPRUS|CROATIA|SLOVENIA|MALTA|TURKEY|LEBANON|ISRAEL)$/i.test(country)) return "MEDITERRANEAN";
+  // France is served via BOTH Zeebrugge (northern hub) and Sagunto/Livorno — return null to skip region filter
+  if(/^(ITALY|SPAIN|GREECE|PORTUGAL|CYPRUS|CROATIA|SLOVENIA|MALTA|TURKEY|LEBANON|ISRAEL)$/i.test(country)) return "MEDITERRANEAN";
   return null;  // unknown — don't filter
 }
 var ORDER_REGION = destRegion(DEST_COUNTRY);
