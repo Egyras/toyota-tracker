@@ -404,6 +404,49 @@ if(MMSI){
           }
         } catch(e){ process.stderr.write("Position check failed for "+m.vessel+": "+e.message+"\n"); }
 
+        // TEMPORAL SANITY CHECK — vessel can't be carrying a car loaded AFTER
+        // the vessel already arrived at the destination on its current rotation.
+        // If the ship was at ZCT (Zeebrugge) or another EU port within ~30 days
+        // BEFORE the order's leftTheFactory date, the car can't be on this ship.
+        try {
+          var depMs = new Date(D+"T00:00:00Z").getTime();
+          var trackUrl = 'https://shipinfo.net/topos/api/vessel/track?days=60&imo='+
+                         (VESSEL_IMO[m.mmsi]||'')+'&mmsi='+m.mmsi;
+          var trackResp = await fetch(trackUrl);
+          var trackData = await trackResp.json();
+          var trackPts = Array.isArray(trackData) ? trackData : (trackData.data || trackData.points || []);
+          // EU port boxes (rough — covers any northern European arrival)
+          var EU_BOXES = [
+            { name:"ZCT",        latMin:51.29, latMax:51.32, lonMin:3.21, lonMax:3.24 },
+            { name:"Bremerhaven",latMin:53.55, latMax:53.62, lonMin:8.55, lonMax:8.62 },
+            { name:"Southampton",latMin:50.88, latMax:50.92, lonMin:-1.45,lonMax:-1.38 },
+            { name:"Sagunto",    latMin:39.62, latMax:39.66, lonMin:-0.25,lonMax:-0.20 },
+          ];
+          var arrivedBefore = null;
+          for(var ti=0; ti<trackPts.length; ti++){
+            var pt = trackPts[ti];
+            if(!pt.lat || !pt.lng) continue;
+            var pms = new Date(pt.updated).getTime();
+            if(pms >= depMs) continue;  // only points BEFORE the depart date
+            for(var bi=0; bi<EU_BOXES.length; bi++){
+              var b = EU_BOXES[bi];
+              if(pt.lat>=b.latMin && pt.lat<=b.latMax &&
+                 pt.lng>=b.lonMin && pt.lng<=b.lonMax &&
+                 (pt.speed_kn||0)<=1){
+                arrivedBefore = { port: b.name, when: pt.updated };
+                break;
+              }
+            }
+            if(arrivedBefore) break;
+          }
+          if(arrivedBefore){
+            var daysBefore = Math.round((depMs - new Date(arrivedBefore.when).getTime())/86400000);
+            process.stderr.write(m.vessel+": at "+arrivedBefore.port+" "+daysBefore+
+              " days BEFORE depart date — car not on this ship, hard reject -50\n");
+            m.europeScore -= 50;
+          }
+        } catch(e){ process.stderr.write("Temporal check failed for "+m.vessel+": "+e.message+"\n"); }
+
         process.stderr.write(m.vessel+": europeScore="+m.europeScore+"\n");
       }catch(e){ m.europeScore=0; }
     }
@@ -437,11 +480,34 @@ if(MMSI){
           process.stderr.write(vm.vessel+': CONFIRMED at '+LEG+' berth ✅\n');
           vm.europeScore += 10;
           vm.berthConfirmed = true;
+        } else if(berthOk === null){
+          // AIS check could not complete (shipinfo had no data, network error etc.).
+          // For nagoya leg, treat this as STRONG NEGATIVE — we can't confirm the ship
+          // was at E5, and unverified detection has produced wrong results before.
+          // For other legs (zeebrugge/malmo), keep neutral as before.
+          if(LEG === 'nagoya'){
+            process.stderr.write(vm.vessel+': berth check returned no data, treating as unconfirmed -10\n');
+            vm.europeScore -= 10;
+          }
         }
-        // berthOk === null means shipinfo.net had no data — neutral, keep europeScore as-is
       }
       matches.sort(function(a,b){return (b.europeScore||0)-(a.europeScore||0);});
       matches = matches.filter(function(m){ return (m.europeScore||0) >= 0; });
+      // For NAGOYA leg, require berth confirmation. If no candidate was
+      // confirmed at E5, return no match rather than guessing — preventing
+      // wrong vessels like Elbe Highway (already in Europe) from being
+      // assigned just because their europeScore was high. Other legs
+      // (zeebrugge/malmo) keep the looser scoring-based winner.
+      if(LEG === 'nagoya'){
+        var confirmed = matches.filter(function(m){ return m.berthConfirmed === true; });
+        if(confirmed.length > 0){
+          matches = confirmed;
+        } else {
+          process.stderr.write('No vessel berth-confirmed at E5 for departure '+D+
+            ', returning no match (was '+matches.length+' candidates)\n');
+          matches = [];
+        }
+      }
     }
   }
 
