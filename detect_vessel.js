@@ -4,6 +4,16 @@ const P=process.env.MST_PASSWORD||"";
 const D=process.argv[2];   // leftTheFactory date OR visited date for intermediate legs
 const MMSI=process.argv[3]||"";
 const LEG=process.argv[4]||"nagoya"; // which leg to detect: nagoya|zeebrugge|malmo
+const DEST_COUNTRY=(process.argv[5]||"").toUpperCase();  // order destination country for route matching
+
+// Region classification for reverse-lookup route matching
+function destRegion(country){
+  if(!country) return null;
+  if(/^(LITHUANIA|LATVIA|ESTONIA|FINLAND|SWEDEN|NORWAY|DENMARK|POLAND|GERMANY|BELGIUM|NETHERLANDS|UNITED KINGDOM|IRELAND|UK)$/i.test(country)) return "NORTHERN";
+  if(/^(FRANCE|ITALY|SPAIN|GREECE|PORTUGAL|CYPRUS|CROATIA|SLOVENIA|MALTA|TURKEY|LEBANON|ISRAEL)$/i.test(country)) return "MEDITERRANEAN";
+  return null;  // unknown — don't filter
+}
+var ORDER_REGION = destRegion(DEST_COUNTRY);
 
 // MyShipTracking port IDs — complete Toyota Europe network
 var PORT_IDS = {
@@ -571,11 +581,112 @@ if(MMSI){
     }
 
     if(candidates.length > 0){
+      // Filter out candidates whose CURRENT position proves they are not on
+      // the Europe voyage (e.g. heading into Pacific, back to Japan, etc).
+      // Same logic as the main scoring's geographic check.
+      // ALSO filter by ROUTE REGION — Mediterranean ships serve Med orders,
+      // Northern Europe ships serve Northern orders. A ship's 60-day track
+      // tells us which region it serves on its current rotation.
+
+      // Classify each candidate's recent destinations into a region.
+      async function vesselRegion(mmsi){
+        try {
+          var imo = VESSEL_IMO[mmsi] || '';
+          if(!imo) return null;
+          var url = 'https://shipinfo.net/topos/api/vessel/track?days=120&imo='+imo+'&mmsi='+mmsi;
+          var resp = await fetch(url);
+          var data = await resp.json();
+          var pts = Array.isArray(data) ? data : (data.data || data.points || []);
+          // Look at stationary points in known European port boxes
+          var medScore = 0, northScore = 0;
+          // Mediterranean port boxes
+          var MED = [
+            { latMin:39.62, latMax:39.66, lonMin:-0.25, lonMax:-0.20 },  // Sagunto
+            { latMin:43.54, latMax:43.58, lonMin:10.28, lonMax:10.33 },  // Livorno
+            { latMin:37.92, latMax:37.97, lonMin:23.60, lonMax:23.65 },  // Piraeus
+            { latMin:28.13, latMax:28.17, lonMin:-15.45,lonMax:-15.40 }, // Las Palmas
+            { latMin:34.65, latMax:34.70, lonMin:33.00, lonMax:33.07 },  // Limassol
+            { latMin:36.55, latMax:36.65, lonMin:35.80, lonMax:36.20 },  // Iskenderun
+            { latMin:33.85, latMax:33.95, lonMin:35.45, lonMax:35.55 },  // Beirut
+          ];
+          // Northern Europe port boxes
+          var NORTH = [
+            { latMin:51.29, latMax:51.33, lonMin:3.18,  lonMax:3.24 },  // Zeebrugge
+            { latMin:53.54, latMax:53.62, lonMin:8.55,  lonMax:8.65 },  // Bremerhaven
+            { latMin:50.88, latMax:50.92, lonMin:-1.45, lonMax:-1.38 }, // Southampton
+            { latMin:55.60, latMax:55.65, lonMin:12.98, lonMax:13.05 }, // Malmö
+            { latMin:53.50, latMax:53.55, lonMin:9.85,  lonMax:10.05 }, // Hamburg
+            { latMin:51.95, latMax:52.00, lonMin:4.10,  lonMax:4.20 },  // Rotterdam
+          ];
+          pts.forEach(function(p){
+            if(!p.lat || !p.lng || (p.speed_kn||0) > 1) return;
+            MED.forEach(function(b){
+              if(p.lat>=b.latMin&&p.lat<=b.latMax&&p.lng>=b.lonMin&&p.lng<=b.lonMax) medScore++;
+            });
+            NORTH.forEach(function(b){
+              if(p.lat>=b.latMin&&p.lat<=b.latMax&&p.lng>=b.lonMin&&p.lng<=b.lonMax) northScore++;
+            });
+          });
+          if(medScore > 0 && medScore > northScore*2) return "MEDITERRANEAN";
+          if(northScore > 0 && northScore > medScore*2) return "NORTHERN";
+          if(medScore === 0 && northScore === 0) return null;
+          return "MIXED";  // serves both regions, can't discriminate
+        } catch(e){ return null; }
+      }
+
+      var goodCandidates = [];
+      for(var ci=0; ci<candidates.length; ci++){
+        var cnd = candidates[ci];
+        try {
+          var curPos = await getShipinfoPosition(cnd.mmsi, VESSEL_IMO[cnd.mmsi]||'');
+          if(!curPos || curPos.lat == null || curPos.lon == null){
+            process.stderr.write('  '+cnd.vessel+': no current pos, skipping\n');
+            continue;
+          }
+          var plat = curPos.lat, plon = curPos.lon;
+          var offRoute = false, reason = "";
+          if(plon < -30 && plon > -170){ offRoute = true; reason = "Americas"; }
+          else if(plon > 141 && plon < 200){ offRoute = true; reason = "Pacific east of Japan"; }
+          else if(plon < -170 || plon > 200){ offRoute = true; reason = "Mid-Pacific"; }
+          else if(plat > 46 && plon > 135){ offRoute = true; reason = "North Pacific"; }
+          else if(plat > 32 && plon >= 117 && plon <= 127){ offRoute = true; reason = "Yellow Sea"; }
+          // Japan-port destination filter REMOVED — AIS dest field is often
+          // a stale last-port-call value (e.g. Cepheus showed HITACHI from a
+          // prior loading stop, but was actually heading SG SIN to Europe).
+          // Position-based geographic check (above) is the reliable signal.
+          if(offRoute){
+            process.stderr.write('  '+cnd.vessel+': REJECTED ('+reason+
+              ', pos lat='+plat.toFixed(1)+' lon='+plon.toFixed(1)+
+              (curPos.dest?', dest='+curPos.dest:'')+')\n');
+            continue;
+          }
+          // ROUTE REGION CHECK — only if we know the order's destination region
+          if(ORDER_REGION){
+            var vRegion = await vesselRegion(cnd.mmsi);
+            if(vRegion && vRegion !== "MIXED" && vRegion !== ORDER_REGION){
+              process.stderr.write('  '+cnd.vessel+': REJECTED (serves '+vRegion+
+                ' route, order is '+ORDER_REGION+')\n');
+              continue;
+            }
+            cnd.vRegion = vRegion;
+          }
+          cnd.curLat = plat; cnd.curLon = plon; cnd.curDest = curPos.dest;
+          goodCandidates.push(cnd);
+        } catch(e){
+          process.stderr.write('  '+cnd.vessel+': position check failed: '+e.message+'\n');
+        }
+      }
+      candidates = goodCandidates;
+    }
+
+    if(candidates.length > 0){
       candidates.sort(function(a,b){ return b.score - a.score; });
-      process.stderr.write('Reverse-lookup found '+candidates.length+' E5-confirmed candidate(s):\n');
+      process.stderr.write('Reverse-lookup '+candidates.length+' candidate(s) after route filter:\n');
       candidates.forEach(function(c){
         process.stderr.write('  '+c.vessel+' ('+c.mmsi+'): '+c.e5Hits+
-                             ' E5 hits, last '+c.lastE5+', score '+c.score.toFixed(1)+'\n');
+                             ' E5 hits, last '+c.lastE5+', score '+c.score.toFixed(1)+
+                             ', pos '+(c.curLat?c.curLat.toFixed(1)+','+c.curLon.toFixed(1):'?')+
+                             (c.curDest?', dest='+c.curDest:'')+'\n');
       });
       var winner = candidates[0];
       process.stderr.write('Winner: '+winner.vessel+' (berth-verified via reverse-lookup)\n');
@@ -589,7 +700,8 @@ if(MMSI){
     } else {
       process.stderr.write('Reverse-lookup: no known Toyota carrier was at E5 in window '+
                            new Date(winStart).toISOString().slice(0,10)+' to '+
-                           new Date(winEnd).toISOString().slice(0,10)+'\n');
+                           new Date(winEnd).toISOString().slice(0,10)+
+                           ' AND heading on Europe route\n');
     }
   }
 

@@ -115,10 +115,13 @@ def _cache_vessel(db, order_hash: str, vessel: dict, leg: str = "nagoya"):
         print(f"[vessel cache] {e}", file=sys.stderr)
 
 
-def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya") -> dict | None:
+def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya",
+                          dest_country: str = "") -> dict | None:
     """
     Detect vessel by scraping MyShipTracking port departures.
     leg: nagoya (default), zeebrugge, malmo, bremerhaven etc.
+    dest_country: order destination country, used for route region matching
+                  in reverse-lookup (e.g. "LITHUANIA" -> Northern Europe ships only).
     """
     if not MST_EMAIL or not MST_PASSWORD:
         return None
@@ -127,7 +130,7 @@ def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya") -> dict |
         env['MST_EMAIL']    = MST_EMAIL
         env['MST_PASSWORD'] = MST_PASSWORD
         result = subprocess.run(
-            ['node', '/app/detect_vessel.js', left_factory_date, '', leg],
+            ['node', '/app/detect_vessel.js', left_factory_date, '', leg, dest_country or ''],
             capture_output=True, text=True, timeout=120, env=env
         )
         if result.returncode != 0:
@@ -153,11 +156,12 @@ def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya") -> dict |
         return None
 
 
-def detect_vessel(left_factory_date: str, leg: str = "nagoya") -> dict | None:
+def detect_vessel(left_factory_date: str, leg: str = "nagoya",
+                  dest_country: str = "") -> dict | None:
     """Auto-detect vessel via MyShipTracking port departure scraper."""
     if not left_factory_date:
         return None
-    vessel = detect_vessel_scraper(left_factory_date, leg=leg)
+    vessel = detect_vessel_scraper(left_factory_date, leg=leg, dest_country=dest_country)
     if vessel:
         pos = get_vessel_position(vessel['mmsi'])
         if pos:
@@ -2357,7 +2361,14 @@ def api_vessel_detect(order_hash):
         else:
             return jsonify(error="no leftTheFactory date"), 404
 
-    vessel = detect_vessel(left_factory_date, leg=leg_override)
+    # Fetch order's destination country for region-aware reverse-lookup
+    dest_row = db.execute(
+        "SELECT dest_country FROM checks WHERE order_hash=? AND dest_country IS NOT NULL "
+        "ORDER BY ts DESC LIMIT 1", (order_hash,)
+    ).fetchone()
+    dest_country = dest_row["dest_country"] if dest_row else ""
+
+    vessel = detect_vessel(left_factory_date, leg=leg_override, dest_country=dest_country)
     if not vessel:
         return jsonify(error="no vessel detected"), 404
 
