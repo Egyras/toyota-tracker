@@ -503,11 +503,93 @@ if(MMSI){
         if(confirmed.length > 0){
           matches = confirmed;
         } else {
-          process.stderr.write('No vessel berth-confirmed at E5 for departure '+D+
-            ', returning no match (was '+matches.length+' candidates)\n');
+          process.stderr.write('No vessel berth-confirmed at E5 from port scrape, '+
+            'trying reverse-lookup against known Toyota carriers...\n');
           matches = [];
         }
       }
+    }
+  }
+
+  // REVERSE-LOOKUP PASS — when port scrape fails for nagoya, scan all known
+  // Toyota Europe carriers' AIS tracks for E5 hits in the departure window.
+  // MST's Nagoya port-departure feed doesn't list PCCs reliably; shipinfo's
+  // satellite AIS does. This finds the right ship even when port scrape fails.
+  if(LEG === 'nagoya' && matches.length === 0){
+    process.stderr.write('Reverse-lookup: checking '+Object.keys(TOYOTA_CARRIERS).length+
+                         ' known Toyota carriers for E5 visits around '+D+'...\n');
+    var depMs = new Date(D+"T00:00:00Z").getTime();
+    var winStart = depMs - 7*86400000;   // D-7
+    var winEnd   = depMs + 2*86400000;   // D+2
+    // E5 berth box (same as NAGOYA_BERTHS[0])
+    var E5_LAT = [35.048, 35.062], E5_LON = [136.875, 136.892];
+
+    var candidates = [];
+    var mmsiList = Object.keys(TOYOTA_CARRIERS);
+    // Run in parallel batches of 5 to keep total time manageable
+    var batchSize = 5;
+    for(var bi=0; bi<mmsiList.length; bi+=batchSize){
+      var batch = mmsiList.slice(bi, bi+batchSize);
+      var results = await Promise.all(batch.map(async function(mmsi){
+        try {
+          var imo = VESSEL_IMO[mmsi] || '';
+          if(!imo) return null;  // shipinfo needs IMO to return data
+          var url = 'https://shipinfo.net/topos/api/vessel/track?days=20&imo='+imo+'&mmsi='+mmsi;
+          var resp = await fetch(url);
+          var data = await resp.json();
+          var pts = Array.isArray(data) ? data : (data.data || data.points || []);
+          // Find E5 stationary points within the departure window
+          var e5Hits = pts.filter(function(p){
+            if(!p.lat || !p.lng) return false;
+            var ts = new Date(p.updated).getTime();
+            return ts >= winStart && ts <= winEnd &&
+                   p.lat >= E5_LAT[0] && p.lat <= E5_LAT[1] &&
+                   p.lng >= E5_LON[0] && p.lng <= E5_LON[1] &&
+                   (p.speed_kn||0) <= 1;
+          });
+          if(e5Hits.length > 0){
+            // Latest E5 hit = the actual departure time
+            e5Hits.sort(function(a,b){ return new Date(b.updated)-new Date(a.updated); });
+            var lastE5 = new Date(e5Hits[0].updated).getTime();
+            return {
+              mmsi: mmsi,
+              vessel: TOYOTA_CARRIERS[mmsi],
+              e5Hits: e5Hits.length,
+              lastE5: e5Hits[0].updated,
+              // Score: more E5 hits + closer to depart date = better match
+              score: e5Hits.length * 10 -
+                     Math.abs(lastE5 - depMs)/86400000
+            };
+          }
+          return null;
+        } catch(e) {
+          process.stderr.write('  '+mmsi+' lookup failed: '+e.message+'\n');
+          return null;
+        }
+      }));
+      results.forEach(function(r){ if(r) candidates.push(r); });
+    }
+
+    if(candidates.length > 0){
+      candidates.sort(function(a,b){ return b.score - a.score; });
+      process.stderr.write('Reverse-lookup found '+candidates.length+' E5-confirmed candidate(s):\n');
+      candidates.forEach(function(c){
+        process.stderr.write('  '+c.vessel+' ('+c.mmsi+'): '+c.e5Hits+
+                             ' E5 hits, last '+c.lastE5+', score '+c.score.toFixed(1)+'\n');
+      });
+      var winner = candidates[0];
+      process.stderr.write('Winner: '+winner.vessel+' (berth-verified via reverse-lookup)\n');
+      matches = [{
+        mmsi: winner.mmsi,
+        vessel: winner.vessel,
+        time: winner.lastE5,
+        europeScore: 100,  // high confidence: berth-confirmed
+        berthConfirmed: true
+      }];
+    } else {
+      process.stderr.write('Reverse-lookup: no known Toyota carrier was at E5 in window '+
+                           new Date(winStart).toISOString().slice(0,10)+' to '+
+                           new Date(winEnd).toISOString().slice(0,10)+'\n');
     }
   }
 
