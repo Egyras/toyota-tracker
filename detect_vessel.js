@@ -496,13 +496,20 @@ async function getMstDetail(pg, mmsi, imo, name){
       try { var r = await fetch(u); return await r.text(); } catch(e){ return ""; }
     }, url);
     if(!html) return null;
-    // Destination: inside myst-arrival-cont, first <h3 ...>DEST</h3>
+    // Destination: the page has TWO "myst-arrival-cont" blocks —
+    //   1st = last port (e.g. KOBE, wrapped in <a>)
+    //   2nd = actual destination (e.g. "SG SIN PEBGA", plain text)
+    // Collect all port h3 blocks, strip nested tags, take the LAST one.
     var dest = null;
-    var arrIdx = html.indexOf("myst-arrival-cont");
-    if(arrIdx >= 0){
-      var seg = html.slice(arrIdx, arrIdx+400);
-      var dm = seg.match(/<h3[^>]*>([^<]+)<\/h3>/);
-      if(dm) dest = dm[1].trim();
+    var h3re = /<h3 class="text-truncate m-1">([\s\S]*?)<\/h3>/g;
+    var ports = [], hm;
+    while((hm = h3re.exec(html)) !== null){
+      var clean = hm[1].replace(/<[^>]+>/g, "").trim();  // strip <a> etc.
+      if(clean) ports.push(clean);
+    }
+    if(ports.length > 0){
+      // Last port block = destination (first is the departed-from port)
+      dest = ports[ports.length - 1];
     }
     // ETA: after "ETA*" label, the date span (+ time)
     var eta = null;
