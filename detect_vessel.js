@@ -694,6 +694,43 @@ if(MMSI){
                 ' route, order is '+ORDER_REGION+')\n');
               continue;
             }
+            // SUB-REGION CHECK for Mediterranean orders:
+            // France/Spain/Portugal are served via SAGUNTO (Western Med).
+            // Greece/Cyprus/Turkey/Lebanon are served via PIRAEUS (Eastern Med).
+            // Italy/Croatia are served via LIVORNO or Sagunto.
+            // A Piraeus-only ship (Cepheus Leader) must NOT match a France order.
+            if(ORDER_REGION === 'MEDITERRANEAN' && DEST_COUNTRY){
+              var needsSagunto = /^(FRANCE|SPAIN|PORTUGAL)$/.test(DEST_COUNTRY);
+              var needsPiraeus = /^(GREECE|CYPRUS|TURKEY|LEBANON|ISRAEL|JORDAN|EGYPT|LIBYA|TUNISIA)$/.test(DEST_COUNTRY);
+              var needsLivorno = /^(ITALY|MALTA|CROATIA|SLOVENIA)$/.test(DEST_COUNTRY);
+              if(needsSagunto || needsPiraeus || needsLivorno){
+                var portOk = await (async function(){
+                  try {
+                    var imo2 = VESSEL_IMO[cnd.mmsi]||'';
+                    if(!imo2) return true;
+                    var url2 = 'https://shipinfo.net/topos/api/vessel/track?days=120&imo='+imo2+'&mmsi='+cnd.mmsi;
+                    var data2 = await (await fetch(url2)).json();
+                    var pts2 = Array.isArray(data2)?data2:(data2.data||data2.points||[]);
+                    var BOX_SAGUNTO={latMin:39.62,latMax:39.66,lonMin:-0.25,lonMax:-0.20};
+                    var BOX_LIVORNO ={latMin:43.54,latMax:43.58,lonMin:10.28,lonMax:10.33};
+                    var BOX_PIRAEUS ={latMin:37.92,latMax:37.97,lonMin:23.60,lonMax:23.65};
+                    function inB(p,b){return p.lat>=b.latMin&&p.lat<=b.latMax&&p.lng>=b.lonMin&&p.lng<=b.lonMax;}
+                    var hasSagunto=pts2.some(function(p){return p.lat&&p.lng&&(p.speed_kn||0)<=1&&inB(p,BOX_SAGUNTO);});
+                    var hasLivorno =pts2.some(function(p){return p.lat&&p.lng&&(p.speed_kn||0)<=1&&inB(p,BOX_LIVORNO);});
+                    var hasPiraeus =pts2.some(function(p){return p.lat&&p.lng&&(p.speed_kn||0)<=1&&inB(p,BOX_PIRAEUS);});
+                    process.stderr.write('  '+cnd.vessel+': Med sub-region: Sagunto='+hasSagunto+' Livorno='+hasLivorno+' Piraeus='+hasPiraeus+'\n');
+                    if(needsSagunto && !hasSagunto && !hasLivorno) return false;
+                    if(needsPiraeus && !hasPiraeus) return false;
+                    if(needsLivorno && !hasLivorno && !hasSagunto) return false;
+                    return true;
+                  } catch(e){ return true; }
+                })();
+                if(!portOk){
+                  process.stderr.write('  '+cnd.vessel+': REJECTED (wrong Med rotation for '+DEST_COUNTRY+')\n');
+                  continue;
+                }
+              }
+            }
             cnd.vRegion = vRegion;
           }
           cnd.curLat = plat; cnd.curLon = plon; cnd.curDest = curPos.dest;
