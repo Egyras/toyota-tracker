@@ -342,6 +342,22 @@ if(MMSI){
       var m=matches[mi];
       if(!m.mmsi){ m.europeScore=0; continue; }
       try{
+        // Early check: if the consolidated position dest (from MST detail / shipinfo) is
+        // an off-route Japan/Pacific port, penalise immediately before any further scoring.
+        var OFF_ROUTE_DEST_EARLY=[
+          'LOS ANGELES','LONG BEACH','BALTIMORE','BRUNSWICK','JACKSONVILLE',
+          'SYDNEY','MELBOURNE','AUCKLAND','FREMANTLE',
+          'DURBAN','MOMBASA','DAR ES SALAAM',
+          'YOKOHAMA','TOKYO','OSAKA','KOBE','HITACHI','KASHIMA',
+          'BUSAN','GUANGZHOU','TIANJIN','SHANGHAI','HONG KONG','KAOHSIUNG',
+          'HAKATA','NIIGATA','SENDAI','MURORAN',
+        ];
+        var knownDest = (result && result.position && result.position.dest) ? result.position.dest.toUpperCase() : '';
+        if(knownDest && OFF_ROUTE_DEST_EARLY.some(function(d){ return knownDest.indexOf(d) >= 0; })){
+          process.stderr.write(m.vessel+": MST/shipinfo dest="+knownDest+" is off-route, penalizing -20\n");
+          if(!m.europeScore) m.europeScore = 0;
+          m.europeScore -= 20;
+        }
         var vurl="https://www.myshiptracking.com/vessels/"+
                  m.vessel.toLowerCase().replace(/\s+/g,"-")+"-mmsi-"+m.mmsi;
         await pg.goto(vurl,{timeout:20000});
@@ -365,8 +381,9 @@ if(MMSI){
           'LOS ANGELES','LONG BEACH','BALTIMORE','BRUNSWICK','JACKSONVILLE',
           'SYDNEY','MELBOURNE','AUCKLAND','FREMANTLE',
           'DURBAN','MOMBASA','DAR ES SALAAM',
-          'YOKOHAMA','TOKYO','OSAKA','KOBE',  // returning to Japan (westbound vessels)
+          'YOKOHAMA','TOKYO','OSAKA','KOBE','HITACHI','KASHIMA',  // Japan ports (not on Europe route)
           'BUSAN','GUANGZHOU','TIANJIN','SHANGHAI','HONG KONG','KAOHSIUNG',
+          'HAKATA','NIIGATA','SENDAI','MURORAN',  // other Japan ports
         ];
         // Singapore, Port Klang, Colombo, Suez ARE on the Europe route — never penalise these.
         try {
