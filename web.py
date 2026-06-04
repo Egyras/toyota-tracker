@@ -3219,6 +3219,21 @@ def api_vessel_detect(order_hash):
         except Exception:
             pass
 
+    # Fallback: if hub still unknown, infer from dest_country
+    # Most French/German/Belgian/Dutch orders route via Zeebrugge; Italy via Livorno/Sagunto
+    if not hub_port and dest_country:
+        _dc = dest_country.upper()
+        if _dc in ('FRANCE', 'GERMANY', 'BELGIUM', 'NETHERLANDS', 'UNITED KINGDOM',
+                   'IRELAND', 'DENMARK', 'NORWAY', 'SWEDEN', 'FINLAND', 'POLAND',
+                   'LITHUANIA', 'LATVIA', 'ESTONIA'):
+            hub_port = 'ZEEBRUGGE'
+        elif _dc in ('GREECE', 'CYPRUS', 'TURKEY', 'LEBANON', 'ISRAEL'):
+            hub_port = 'PIRAEUS'
+        elif _dc in ('ITALY', 'CROATIA', 'SLOVENIA', 'MALTA'):
+            hub_port = 'LIVORNO'
+        elif _dc in ('SPAIN', 'PORTUGAL'):
+            hub_port = 'SAGUNTO'
+
     vessel = detect_vessel(left_factory_date, leg=leg_override, dest_country=dest_country, hub_port=hub_port)
     if not vessel:
         return jsonify(error="no vessel detected"), 404
