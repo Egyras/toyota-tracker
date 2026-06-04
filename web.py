@@ -923,7 +923,7 @@ a:hover{color:var(--red);}
   border-bottom:1px solid rgba(255,255,255,.06);
   padding:0 1.5rem;
   display:flex;align-items:center;height:60px;
-  position:sticky;top:0;z-index:100;
+  position:sticky;top:0;z-index:1100;
 }
 .nav-brand{display:flex;align-items:center;gap:10px;text-decoration:none!important;}
 .nav-brand-icon{
