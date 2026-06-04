@@ -1908,6 +1908,10 @@ TRACKER_PAGE = BASE + """
         <div class="voyage-bar-bg">
           <div class="voyage-bar" id="voyage-bar" style="width:0%;"></div>
         </div>
+        <div id="voyage-next-stop" style="display:none;margin-top:6px;font-size:11px;color:var(--muted);">
+          Next stop: <span id="voyage-next-dest" style="color:var(--text);font-weight:600;"></span>
+          <span id="voyage-next-eta" style="color:var(--red-bright);font-weight:600;margin-left:4px;"></span>
+        </div>
       </div>
       <div class="vessel-card-links" id="vessel-links"></div>
     </div>
@@ -2237,15 +2241,15 @@ TRACKER_PAGE = BASE + """
           }
         }
         // Voyage progress line
-        renderVoyageProgress(lat, lng, dest);
+        renderVoyageProgress(lat, lng, dest, eta);
         // ETA estimate banner
-        renderEtaBanner(lat, lng);
+        renderEtaBanner(lat, lng, eta, speed);
         card.style.display='block';
       }
     }
 
     // ETA: given current vessel position and route, estimate arrival at final dealer
-    function renderEtaBanner(lat, lng){
+    function renderEtaBanner(lat, lng, eta, speed){
       var banner = document.getElementById('eta-banner');
       var valEl = document.getElementById('eta-value');
       var detEl = document.getElementById('eta-detail');
@@ -2272,30 +2276,67 @@ TRACKER_PAGE = BASE + """
         cumKm+=segKm;
       }
       var remainingKm=totalKm-bestProgress;
-      // Average speeds (deep sea PCC ~17kn = 31 km/h; Baltic feeders ~15kn = 28 km/h; truck ~60km/h but short)
-      // Assume deep sea for most of remaining + 3 days port dwells per remaining hub
-      // Conservative: ~600 km/day average including port stops (PCC 17kn × 24h × 0.8 efficiency = ~650 km/day, minus dwells)
-      var kmPerDay = 550;
-      var daysRemaining = remainingKm/kmPerDay;
-      // Add fixed buffer for hub-leg transitions (Zeebrugge→Malmö→Paldiski→Truck): ~5 days total dwell
-      // But only if we're still upstream of those hubs (more than 1000km remaining)
-      if(remainingKm > 1000) daysRemaining += 5;
-      else if(remainingKm > 200) daysRemaining += 2;
-      var arriveMs=Date.now()+daysRemaining*86400000;
-      var arrive=new Date(arriveMs);
-      var earlyArrive=new Date(arriveMs-3*86400000);
-      var lateArrive=new Date(arriveMs+3*86400000);
+      // OCEAN ROUTING CORRECTION:
+      // Route waypoints are Toyota delivery stops (origin + final destination, sometimes 2-3 hubs).
+      // Straight-line great-circle between them is 2–2.5× shorter than the actual sea route.
+      // Example: Nagoya → Zeebrugge great-circle = ~9,400 km, actual via Suez = ~21,000 km.
+      // Apply a per-segment correction factor based on segment length:
+      //   >2500 km segments = major ocean crossings: actual route ~2.1× great-circle
+      //   800–2500 km = regional ocean hops: ~1.55×
+      //   <800 km = near-destination / coastal: ~1.1×
+      var correctedRemainingKm = 0;
+      cumKm = 0;
+      for(var i=1;i<latlngs.length;i++){
+        var segKm = dist(latlngs[i-1],latlngs[i]);
+        var segStart = cumKm;
+        var segEnd = cumKm + segKm;
+        // How much of this segment is still remaining?
+        var overlapStart = Math.max(segStart, bestProgress);
+        var overlapEnd = segEnd;
+        if(overlapEnd > overlapStart){
+          var segRemaining = overlapEnd - overlapStart;
+          var mult = segKm > 2500 ? 2.1 : segKm > 800 ? 1.55 : 1.1;
+          correctedRemainingKm += segRemaining * mult;
+        }
+        cumKm += segKm;
+      }
+      if(correctedRemainingKm < 1) correctedRemainingKm = remainingKm; // fallback
+      // Speed: use actual vessel speed if available, else 550 km/day
+      // PCC typical: 15–17 kn = 28–31 km/h; at 85% efficiency (routing, currents, slow approach) → multiply by ~0.85
+      var kmPerDay = (speed && speed > 5) ? Math.round(speed * 1.852 * 24 * 0.85) : 550;
+      kmPerDay = Math.max(350, Math.min(780, kmPerDay)); // sanity clamp
+      var daysRemaining = correctedRemainingKm / kmPerDay;
+      // Port dwell buffer: 1-2 days per major hub + final truck leg
+      if(correctedRemainingKm > 8000) daysRemaining += 7;      // deep ocean, multiple hubs ahead
+      else if(correctedRemainingKm > 3000) daysRemaining += 4; // one hub remaining
+      else if(correctedRemainingKm > 800)  daysRemaining += 2; // final port → depot → dealer
+      else                                  daysRemaining += 1; // just truck leg
+      // Uncertainty: ocean routes have higher variance; widen for far-out arrivals
+      var uncertainty = correctedRemainingKm > 5000 ? 7 : correctedRemainingKm > 2000 ? 5 : 3;
+      var arriveMs = Date.now() + daysRemaining*86400000;
+      var arrive = new Date(arriveMs);
+      var earlyArrive = new Date(arriveMs - uncertainty*86400000);
+      var lateArrive  = new Date(arriveMs + uncertainty*86400000);
       function fmt(d){ return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
       valEl.textContent = fmt(earlyArrive)+' – '+fmt(lateArrive);
       var fullYear = arrive.toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
-      detEl.textContent = 'Most likely '+fullYear+' · '+
-                          remainingKm.toFixed(0)+' km remaining · '+
-                          Math.round(daysRemaining)+' days';
+      // Show next-stop ETA anchor if we have AIS ETA
+      var nextStopNote = '';
+      if(eta){
+        var etaDate = new Date(eta.replace(' UTC','Z').replace(/^(\d{4}-\d{2}-\d{2}) /,'$1T'));
+        if(!isNaN(etaDate.getTime()) && etaDate > Date.now()){
+          var msLeft = etaDate - Date.now();
+          var dLeft = Math.floor(msLeft/86400000);
+          var hLeft = Math.floor((msLeft%86400000)/3600000);
+          nextStopNote = ' · Next stop in '+(dLeft>0?dLeft+'d ':'')+hLeft+'h';
+        }
+      }
+      detEl.textContent = 'Most likely '+fullYear+' · ~'+Math.round(daysRemaining)+' days'+nextStopNote;
       banner.style.display='flex';
     }
 
     // Voyage progress: shows progress from last hub to next hub based on lat/lng
-    function renderVoyageProgress(lat, lng, destText){
+    function renderVoyageProgress(lat, lng, destText, eta){
       var bar = document.getElementById('voyage-bar');
       var fromEl = document.getElementById('voyage-from');
       var toEl = document.getElementById('voyage-to');
@@ -2337,6 +2378,25 @@ TRACKER_PAGE = BASE + """
       fromEl.textContent = fromName;
       toEl.textContent = toName;
       pctEl.textContent = pct.toFixed(0)+'%';
+      // Next stop ETA from AIS
+      var nextStopEl = document.getElementById('voyage-next-stop');
+      var nextDestEl = document.getElementById('voyage-next-dest');
+      var nextEtaEl  = document.getElementById('voyage-next-eta');
+      if(nextStopEl && destText && eta){
+        var etaDate = new Date(eta.replace(' UTC','Z').replace(/^(\d{4}-\d{2}-\d{2}) /,'$1T'));
+        if(!isNaN(etaDate.getTime()) && etaDate > Date.now()){
+          var msLeft = etaDate - Date.now();
+          var dLeft = Math.floor(msLeft/86400000);
+          var hLeft = Math.floor((msLeft%86400000)/3600000);
+          var mLeft = Math.floor((msLeft%3600000)/60000);
+          var timeStr = dLeft > 0 ? 'in '+dLeft+'d '+hLeft+'h' : 'in '+hLeft+'h '+mLeft+'m';
+          if(nextDestEl) nextDestEl.textContent = destText;
+          if(nextEtaEl)  nextEtaEl.textContent  = timeStr;
+          nextStopEl.style.display = 'block';
+        } else {
+          nextStopEl.style.display = 'none';
+        }
+      } else if(nextStopEl) { nextStopEl.style.display = 'none'; }
     }
 
     // Auto-detect vessel — only if date is reliable or vessel already known
