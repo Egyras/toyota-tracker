@@ -3210,7 +3210,7 @@ def api_vessel_detect(order_hash):
         try:
             delivs = json.loads(hub_row["deliveries_json"])
             for d in (delivs if isinstance(delivs, list) else []):
-                loc = (d.get("locationName") or "").upper()
+                loc = (d.get("loc") or d.get("locationName") or "").upper()
                 if any(p in loc for p in ["SAGUNTO", "ZEEBRUGGE", "BREMERHAVEN", "SOUTHAMPTON",
                                            "PIRAEUS", "MALMO", "GOTHENBURG", "DRAMMEN",
                                            "LIVORNO", "ANTWERP", "PALDISKI"]):
@@ -3223,16 +3223,16 @@ def api_vessel_detect(order_hash):
     # Most French/German/Belgian/Dutch orders route via Zeebrugge; Italy via Livorno/Sagunto
     if not hub_port and dest_country:
         _dc = dest_country.upper()
-        if _dc in ('FRANCE', 'GERMANY', 'BELGIUM', 'NETHERLANDS', 'UNITED KINGDOM',
+        if _dc in ('GERMANY', 'BELGIUM', 'NETHERLANDS', 'UNITED KINGDOM',
                    'IRELAND', 'DENMARK', 'NORWAY', 'SWEDEN', 'FINLAND', 'POLAND',
                    'LITHUANIA', 'LATVIA', 'ESTONIA'):
             hub_port = 'ZEEBRUGGE'
+        elif _dc in ('FRANCE', 'SPAIN', 'PORTUGAL'):
+            hub_port = 'SAGUNTO'
         elif _dc in ('GREECE', 'CYPRUS', 'TURKEY', 'LEBANON', 'ISRAEL'):
             hub_port = 'PIRAEUS'
         elif _dc in ('ITALY', 'CROATIA', 'SLOVENIA', 'MALTA'):
             hub_port = 'LIVORNO'
-        elif _dc in ('SPAIN', 'PORTUGAL'):
-            hub_port = 'SAGUNTO'
 
     vessel = detect_vessel(left_factory_date, leg=leg_override, dest_country=dest_country, hub_port=hub_port)
     if not vessel:
