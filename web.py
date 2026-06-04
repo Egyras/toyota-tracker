@@ -1896,7 +1896,7 @@ TRACKER_PAGE = BASE + """
         </div>
         <div class="vessel-card-side">
           <div class="vessel-card-mmsi">MMSI <span id="vessel-mmsi">—</span></div>
-          <div class="vessel-card-source">Based on departure timing</div>
+          <div class="vessel-card-source" id="vessel-updated" style="display:none;"></div>
         </div>
       </div>
       <!-- Voyage progress -->
@@ -2177,7 +2177,7 @@ TRACKER_PAGE = BASE + """
         '</svg>';
       var icon = L.divIcon({
         className:'',
-        html:'<div style="position:relative;text-align:center;">' +
+        html:'<div style="position:relative;width:32px;">' +
              shipSvg +
              '<div style="position:absolute;top:34px;left:50%;transform:translateX(-50%);' +
              'background:rgba(10,13,18,0.92);color:#fff;font-size:10px;font-weight:600;' +
@@ -2185,7 +2185,7 @@ TRACKER_PAGE = BASE + """
              'border:1px solid '+(isStale?'rgba(136,136,136,0.5)':'rgba(229,0,26,0.5)')+';' +
              'box-shadow:0 2px 6px rgba(0,0,0,0.4);">'+name+'</div>' +
              '</div>',
-        iconSize:[80,52],iconAnchor:[16,16]
+        iconSize:[32,52],iconAnchor:[16,16]
       });
       vesselMarker = L.marker([lat,lng],{icon:icon,zIndexOffset:1000}).addTo(map)
         .bindPopup(
@@ -2202,8 +2202,8 @@ TRACKER_PAGE = BASE + """
       // Subtle pulsing circle around vessel (skip if stale)
       if(!isStale){
         vesselPulse = L.circle([lat,lng],{
-          radius:200000,color:'#e5001a',fillColor:'#e5001a',
-          fillOpacity:0.04,weight:1,dashArray:'4 4'
+          radius:80000,color:'#e5001a',fillColor:'#e5001a',
+          fillOpacity:0.05,weight:1.5,dashArray:'5 5'
         }).addTo(map);
       }
       // Show vessel info card
@@ -2215,12 +2215,22 @@ TRACKER_PAGE = BASE + """
         document.getElementById('vessel-speed').textContent = speed+' knots';
         document.getElementById('vessel-dest').textContent = dest||'—';
         document.getElementById('vessel-mmsi').textContent = mmsi;
+        // Last updated time
+        var updEl = document.getElementById('vessel-updated');
+        if(updEl && ageMin != null){
+          var updText;
+          if(ageMin < 60) updText = ageMin+' min ago';
+          else if(ageMin < 1440) updText = Math.floor(ageMin/60)+'h '+(ageMin%60)+'m ago';
+          else updText = Math.floor(ageMin/1440)+'d ago';
+          updEl.textContent = 'AIS: '+updText;
+          updEl.style.display = 'inline';
+        }
         // Stale badge
         var staleEl = document.getElementById('vessel-stale');
         if(staleEl){
           if(isStale){
             var hrs = Math.floor(ageMin/60);
-            staleEl.textContent = 'Updated '+hrs+'h ago';
+            staleEl.textContent = hrs+'h stale';
             staleEl.style.display = 'inline-flex';
           } else {
             staleEl.style.display = 'none';
