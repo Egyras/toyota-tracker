@@ -1771,10 +1771,12 @@ TRACKER_PAGE = BASE + """
           <span class="badge badge-{{ s }}" style="margin-top:5px;">{{ s }}</span>
           {% if step_name in step_dates %}
             {% set days_gap = (order._days_tracked // (order._logins - 1 if order._logins > 1 else 1)) if order._logins > 1 else 99 %}
-            {% if order._logins == 1 %}
+            {% set step_observed = order._step_observed.get(step_name, -1) if order._step_observed else -1 %}
+            {% set already_done_on_first_login = (step_observed == 0 and order._logins >= 1 and not step_dates[step_name].get('visited')) %}
+            {% if order._logins == 1 or already_done_on_first_login %}
               {% set rel_icon = '⚠️' %}
               {% set rel_label = 'Estimated' %}
-              {% set rel_desc = 'First login — shows when you checked, not when step happened' %}
+              {% set rel_desc = 'Step was already completed when you first logged in — shows first-login date, not actual date' %}
               {% set rel_bg = 'rgba(139,148,158,0.15)' %}
               {% set rel_border = 'rgba(139,148,158,0.3)' %}
               {% set rel_color = 'var(--muted)' %}
@@ -1994,7 +1996,9 @@ TRACKER_PAGE = BASE + """
       {% set step_date = order._step_dates.leftTheFactory if leg_key == 'nagoya' else
                          order._step_dates.get(leg_key, {}) if order._step_dates else {} %}
       {% set days_gap = (order._days_tracked // (order._logins - 1 if order._logins > 1 else 1)) if order._logins > 1 else 99 %}
-      {% set date_reliable = order._logins >= 2 and days_gap <= 3 %}
+      {% set lf_observed = order._step_observed.get('leftTheFactory', -1) if order._step_observed else -1 %}
+      {% set lf_already_done = (lf_observed == 0 and not (order._step_dates.leftTheFactory.visited if order._step_dates and order._step_dates.leftTheFactory else false)) %}
+      {% set date_reliable = order._logins >= 2 and days_gap <= 3 and not lf_already_done %}
       <div style="margin:6px 0 2px 44px;">
         <div style="display:flex;gap:6px;flex-wrap:wrap;">
           <input type="date" id="date-{{ leg_key }}"
@@ -2955,6 +2959,16 @@ def index():
                            created_on=_order_dates.get(oid, ""))
                 details['_step_dates'] = step_dates.get("steps", {})
                 details['_created_on'] = _order_dates.get(oid, "")
+                # Load observed flags from step_durations — tells us if we
+                # *witnessed* the transition (observed=1) or it was already
+                # done on first login (observed=0, date unreliable regardless of login frequency)
+                if order_hash:
+                    obs_rows = get_db().execute(
+                        "SELECT step, observed FROM step_durations WHERE order_hash=?", (order_hash,)
+                    ).fetchall()
+                    details['_step_observed'] = {r['step']: r['observed'] for r in obs_rows}
+                else:
+                    details['_step_observed'] = {}
                 import hashlib
                 order_hash = hashlib.sha256(oid.encode()).hexdigest()[:16] if oid else ""
                 details['_order_hash'] = order_hash
