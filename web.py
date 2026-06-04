@@ -116,12 +116,12 @@ def _cache_vessel(db, order_hash: str, vessel: dict, leg: str = "nagoya"):
 
 
 def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya",
-                          dest_country: str = "") -> dict | None:
+                          dest_country: str = "", hub_port: str = "") -> dict | None:
     """
     Detect vessel by scraping MyShipTracking port departures.
     leg: nagoya (default), zeebrugge, malmo, bremerhaven etc.
-    dest_country: order destination country, used for route region matching
-                  in reverse-lookup (e.g. "LITHUANIA" -> Northern Europe ships only).
+    dest_country: order destination country, used for route region matching.
+    hub_port: intermediate hub (e.g. SAGUNTO, ZEEBRUGGE) to override region inference.
     """
     if not MST_EMAIL or not MST_PASSWORD:
         return None
@@ -130,7 +130,7 @@ def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya",
         env['MST_EMAIL']    = MST_EMAIL
         env['MST_PASSWORD'] = MST_PASSWORD
         result = subprocess.run(
-            ['node', '/app/detect_vessel.js', left_factory_date, '', leg, dest_country or ''],
+            ['node', '/app/detect_vessel.js', left_factory_date, '', leg, dest_country or '', hub_port or ''],
             capture_output=True, text=True, timeout=120, env=env
         )
         if result.returncode != 0:
@@ -157,11 +157,11 @@ def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya",
 
 
 def detect_vessel(left_factory_date: str, leg: str = "nagoya",
-                  dest_country: str = "") -> dict | None:
+                  dest_country: str = "", hub_port: str = "") -> dict | None:
     """Auto-detect vessel via MyShipTracking port departure scraper."""
     if not left_factory_date:
         return None
-    vessel = detect_vessel_scraper(left_factory_date, leg=leg, dest_country=dest_country)
+    vessel = detect_vessel_scraper(left_factory_date, leg=leg, dest_country=dest_country, hub_port=hub_port)
     if vessel:
         pos = get_vessel_position(vessel['mmsi'])
         if pos:
@@ -3199,7 +3199,27 @@ def api_vessel_detect(order_hash):
     ).fetchone()
     dest_country = dest_row["dest_country"] if dest_row else ""
 
-    vessel = detect_vessel(left_factory_date, leg=leg_override, dest_country=dest_country)
+    # Fetch intermediate hub port (Sagunto/Zeebrugge/etc.) from last known deliveries
+    # so detect_vessel.js can discriminate Med sub-rotation (France via Sagunto vs Zeebrugge)
+    hub_port = ""
+    hub_row = db.execute(
+        "SELECT deliveries_json FROM checks WHERE order_hash=? AND deliveries_json IS NOT NULL "
+        "ORDER BY ts DESC LIMIT 1", (order_hash,)
+    ).fetchone()
+    if hub_row:
+        try:
+            delivs = json.loads(hub_row["deliveries_json"])
+            for d in (delivs if isinstance(delivs, list) else []):
+                loc = (d.get("locationName") or "").upper()
+                if any(p in loc for p in ["SAGUNTO", "ZEEBRUGGE", "BREMERHAVEN", "SOUTHAMPTON",
+                                           "PIRAEUS", "MALMO", "GOTHENBURG", "DRAMMEN",
+                                           "LIVORNO", "ANTWERP", "PALDISKI"]):
+                    hub_port = loc.split()[0]  # first word e.g. "SAGUNTO"
+                    break
+        except Exception:
+            pass
+
+    vessel = detect_vessel(left_factory_date, leg=leg_override, dest_country=dest_country, hub_port=hub_port)
     if not vessel:
         return jsonify(error="no vessel detected"), 404
 

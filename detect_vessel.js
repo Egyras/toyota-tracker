@@ -5,15 +5,29 @@ const D=process.argv[2];   // leftTheFactory date OR visited date for intermedia
 const MMSI=process.argv[3]||"";
 const LEG=process.argv[4]||"nagoya"; // which leg to detect: nagoya|zeebrugge|malmo
 const DEST_COUNTRY=(process.argv[5]||"").toUpperCase();  // order destination country for route matching
+const HUB_PORT=(process.argv[6]||"").toUpperCase();      // intermediate hub port (e.g. SAGUNTO, ZEEBRUGGE)
 
-// Region classification for reverse-lookup route matching
+// Region classification for reverse-lookup route matching.
+// France/Italy/Spain can be served via EITHER Sagunto (Med ship) or Zeebrugge (Northern ship),
+// so we return null for them unless HUB_PORT is known, to avoid false regional rejects.
 function destRegion(country){
   if(!country) return null;
   if(/^(LITHUANIA|LATVIA|ESTONIA|FINLAND|SWEDEN|NORWAY|DENMARK|POLAND|GERMANY|BELGIUM|NETHERLANDS|UNITED KINGDOM|IRELAND|UK)$/i.test(country)) return "NORTHERN";
-  if(/^(FRANCE|ITALY|SPAIN|GREECE|PORTUGAL|CYPRUS|CROATIA|SLOVENIA|MALTA|TURKEY|LEBANON|ISRAEL)$/i.test(country)) return "MEDITERRANEAN";
-  return null;  // unknown — don't filter
+  // Pure Mediterranean-only destinations (never served via Zeebrugge)
+  if(/^(GREECE|CYPRUS|TURKEY|LEBANON|ISRAEL|JORDAN|EGYPT|LIBYA|TUNISIA|CROATIA|SLOVENIA|MALTA)$/i.test(country)) return "MEDITERRANEAN";
+  // Mixed — France/Italy/Spain/Portugal can go via Sagunto OR Zeebrugge
+  // Let HUB_PORT decide below
+  return null;
 }
+// If HUB_PORT is known, override region based on which hub the order routes through
 var ORDER_REGION = destRegion(DEST_COUNTRY);
+if(!ORDER_REGION && HUB_PORT){
+  var NORTHERN_HUBS = ['ZEEBRUGGE','BREMERHAVEN','SOUTHAMPTON','PORTBURY','MALMO','GOTHENBURG','DRAMMEN','ANTWERP','PALDISKI','VEJLE'];
+  var MED_HUBS      = ['SAGUNTO','LIVORNO','PIRAEUS','VALENCIA','LAS PALMAS'];
+  if(NORTHERN_HUBS.some(function(h){ return HUB_PORT.indexOf(h) >= 0; })) ORDER_REGION = "NORTHERN";
+  else if(MED_HUBS.some(function(h){ return HUB_PORT.indexOf(h) >= 0; }))  ORDER_REGION = "MEDITERRANEAN";
+}
+process.stderr.write("Dest: "+DEST_COUNTRY+" Hub: "+(HUB_PORT||"unknown")+" → ORDER_REGION: "+(ORDER_REGION||"any")+"\n");
 
 // MyShipTracking port IDs — complete Toyota Europe network
 var PORT_IDS = {
@@ -686,53 +700,16 @@ if(MMSI){
               (curPos.dest?', dest='+curPos.dest:'')+')\n');
             continue;
           }
-          // ROUTE REGION CHECK — only if we know the order's destination region
-          if(ORDER_REGION){
-            var vRegion = await vesselRegion(cnd.mmsi);
-            if(vRegion && vRegion !== "MIXED" && vRegion !== ORDER_REGION){
-              process.stderr.write('  '+cnd.vessel+': REJECTED (serves '+vRegion+
-                ' route, order is '+ORDER_REGION+')\n');
-              continue;
-            }
-            // SUB-REGION CHECK for Mediterranean orders:
-            // France/Spain/Portugal are served via SAGUNTO (Western Med).
-            // Greece/Cyprus/Turkey/Lebanon are served via PIRAEUS (Eastern Med).
-            // Italy/Croatia are served via LIVORNO or Sagunto.
-            // A Piraeus-only ship (Cepheus Leader) must NOT match a France order.
-            if(ORDER_REGION === 'MEDITERRANEAN' && DEST_COUNTRY){
-              var needsSagunto = /^(FRANCE|SPAIN|PORTUGAL)$/.test(DEST_COUNTRY);
-              var needsPiraeus = /^(GREECE|CYPRUS|TURKEY|LEBANON|ISRAEL|JORDAN|EGYPT|LIBYA|TUNISIA)$/.test(DEST_COUNTRY);
-              var needsLivorno = /^(ITALY|MALTA|CROATIA|SLOVENIA)$/.test(DEST_COUNTRY);
-              if(needsSagunto || needsPiraeus || needsLivorno){
-                var portOk = await (async function(){
-                  try {
-                    var imo2 = VESSEL_IMO[cnd.mmsi]||'';
-                    if(!imo2) return true;
-                    var url2 = 'https://shipinfo.net/topos/api/vessel/track?days=120&imo='+imo2+'&mmsi='+cnd.mmsi;
-                    var data2 = await (await fetch(url2)).json();
-                    var pts2 = Array.isArray(data2)?data2:(data2.data||data2.points||[]);
-                    var BOX_SAGUNTO={latMin:39.62,latMax:39.66,lonMin:-0.25,lonMax:-0.20};
-                    var BOX_LIVORNO ={latMin:43.54,latMax:43.58,lonMin:10.28,lonMax:10.33};
-                    var BOX_PIRAEUS ={latMin:37.92,latMax:37.97,lonMin:23.60,lonMax:23.65};
-                    function inB(p,b){return p.lat>=b.latMin&&p.lat<=b.latMax&&p.lng>=b.lonMin&&p.lng<=b.lonMax;}
-                    var hasSagunto=pts2.some(function(p){return p.lat&&p.lng&&(p.speed_kn||0)<=1&&inB(p,BOX_SAGUNTO);});
-                    var hasLivorno =pts2.some(function(p){return p.lat&&p.lng&&(p.speed_kn||0)<=1&&inB(p,BOX_LIVORNO);});
-                    var hasPiraeus =pts2.some(function(p){return p.lat&&p.lng&&(p.speed_kn||0)<=1&&inB(p,BOX_PIRAEUS);});
-                    process.stderr.write('  '+cnd.vessel+': Med sub-region: Sagunto='+hasSagunto+' Livorno='+hasLivorno+' Piraeus='+hasPiraeus+'\n');
-                    if(needsSagunto && !hasSagunto && !hasLivorno) return false;
-                    if(needsPiraeus && !hasPiraeus) return false;
-                    if(needsLivorno && !hasLivorno && !hasSagunto) return false;
-                    return true;
-                  } catch(e){ return true; }
-                })();
-                if(!portOk){
-                  process.stderr.write('  '+cnd.vessel+': REJECTED (wrong Med rotation for '+DEST_COUNTRY+')\n');
-                  continue;
-                }
+            // ROUTE REGION CHECK — only if we know the order's destination region
+            if(ORDER_REGION){
+              var vRegion = await vesselRegion(cnd.mmsi);
+              if(vRegion && vRegion !== "MIXED" && vRegion !== ORDER_REGION){
+                process.stderr.write('  '+cnd.vessel+': REJECTED (serves '+vRegion+
+                  ' route, order is '+ORDER_REGION+')\n');
+                continue;
               }
+              cnd.vRegion = vRegion;
             }
-            cnd.vRegion = vRegion;
-          }
           cnd.curLat = plat; cnd.curLon = plon; cnd.curDest = curPos.dest;
           goodCandidates.push(cnd);
         } catch(e){
