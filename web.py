@@ -1233,6 +1233,133 @@ a:hover{color:var(--red);}
 }
 
 /* VESSEL CARD */
+.route-map{
+  height:380px;border-radius:10px;margin-bottom:1.25rem;
+  border:1px solid var(--border);overflow:hidden;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.03),0 4px 16px rgba(0,0,0,.25);
+}
+@media (max-width:768px){
+  .route-map{height:300px;}
+}
+
+/* VESSEL SKELETON (loading state) */
+.vessel-skeleton{
+  background:linear-gradient(180deg,var(--surface) 0%,var(--bg-elev) 100%);
+  border:1px solid var(--border);border-radius:var(--radius);
+  padding:1.15rem 1.25rem;margin-bottom:1.25rem;
+  position:relative;overflow:hidden;
+}
+.vessel-skeleton::before{
+  content:'';position:absolute;left:0;top:0;bottom:0;width:3px;
+  background:linear-gradient(180deg,#444 0%,#222 100%);
+}
+.skel-line{
+  height:12px;background:var(--surface2);border-radius:5px;
+  margin-bottom:8px;position:relative;overflow:hidden;
+}
+.skel-line::after{
+  content:'';position:absolute;inset:0;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.05),transparent);
+  animation:shimmer 1.5s linear infinite;
+}
+@keyframes shimmer{
+  from{transform:translateX(-100%);}
+  to{transform:translateX(100%);}
+}
+.skel-line.skel-label{width:35%;height:8px;}
+.skel-line.skel-title{width:55%;height:18px;margin-top:4px;}
+.skel-line.skel-meta{width:75%;}
+.skel-status{
+  font-size:11px;color:var(--muted);margin-top:10px;
+  display:flex;align-items:center;gap:7px;
+}
+.skel-spinner{
+  width:11px;height:11px;border-radius:50%;
+  border:2px solid var(--surface2);border-top-color:var(--red);
+  animation:spin 1s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg);}}
+
+/* VESSEL STALE INDICATOR */
+.vessel-stale{
+  display:inline-flex;align-items:center;gap:5px;
+  font-size:10px;font-weight:600;
+  background:rgba(210,153,34,.12);color:#e3b341;
+  border:1px solid rgba(210,153,34,.3);
+  padding:2px 8px;border-radius:20px;
+  margin-left:8px;text-transform:none;letter-spacing:0;
+}
+.vessel-stale::before{
+  content:'';width:5px;height:5px;border-radius:50%;background:#e3b341;
+}
+
+/* VOYAGE PROGRESS */
+.voyage-progress{
+  margin-top:.85rem;padding-top:.85rem;
+  border-top:1px solid var(--border);
+}
+.voyage-head{
+  display:flex;justify-content:space-between;align-items:baseline;
+  font-size:11px;color:var(--muted);margin-bottom:6px;
+  font-weight:500;
+}
+.voyage-from,.voyage-to{
+  color:var(--text);font-size:12px;font-weight:600;
+}
+.voyage-pct{
+  color:var(--red-bright);font-weight:700;font-size:11px;
+  font-feature-settings:'tnum';letter-spacing:.02em;
+}
+.voyage-bar-bg{
+  height:6px;background:var(--surface2);border-radius:3px;
+  overflow:hidden;position:relative;
+}
+.voyage-bar{
+  height:100%;
+  background:linear-gradient(90deg,var(--red) 0%,var(--red-bright) 100%);
+  box-shadow:0 0 8px rgba(229,0,26,.5);
+  border-radius:3px;
+  transition:width 1s var(--ease);
+  position:relative;
+}
+.voyage-bar::after{
+  content:'';position:absolute;right:-2px;top:50%;transform:translateY(-50%);
+  width:10px;height:10px;border-radius:50%;background:#fff;
+  box-shadow:0 0 0 2px var(--red-bright),0 0 12px rgba(229,0,26,.6);
+}
+
+/* ETA BANNER */
+.eta-banner{
+  display:flex;align-items:center;gap:14px;
+  background:linear-gradient(135deg,rgba(31,111,235,.12) 0%,rgba(31,111,235,.05) 100%);
+  border:1px solid rgba(31,111,235,.25);
+  border-radius:var(--radius);
+  padding:1.1rem 1.25rem;margin-bottom:1.25rem;
+}
+.eta-icon{
+  width:42px;height:42px;border-radius:10px;flex-shrink:0;
+  background:linear-gradient(135deg,#1f6feb 0%,#0d4ea1 100%);
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 4px 12px rgba(31,111,235,.3);
+}
+.eta-icon svg{width:22px;height:22px;color:#fff;}
+.eta-content{flex:1;min-width:0;}
+.eta-label{
+  font-size:10px;font-weight:600;color:#7bb3ff;
+  text-transform:uppercase;letter-spacing:.08em;margin-bottom:3px;
+}
+.eta-value{
+  font-size:17px;font-weight:600;color:var(--text-strong);
+  letter-spacing:-.01em;
+}
+.eta-detail{font-size:12px;color:var(--muted);margin-top:2px;}
+@media (max-width:520px){
+  .eta-banner{padding:.95rem 1rem;gap:11px;}
+  .eta-icon{width:38px;height:38px;}
+  .eta-value{font-size:16px;}
+}
+
+/* VESSEL CARD */
 .vessel-card{
   background:
     linear-gradient(180deg,rgba(31,111,235,.04) 0%,transparent 100%),
@@ -1716,8 +1843,32 @@ TRACKER_PAGE = BASE + """
   <div class="card">
     <div class="card-title">Delivery route</div>
 
-    <div id="route-map" style="height:280px;border-radius:8px;margin-bottom:1.25rem;
-         border:1px solid var(--border);overflow:hidden;"></div>
+    <div id="route-map" class="route-map"></div>
+
+    <!-- ETA banner (estimated dealer arrival) -->
+    <div id="eta-banner" class="eta-banner" style="display:none;">
+      <div class="eta-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+        </svg>
+      </div>
+      <div class="eta-content">
+        <div class="eta-label">Estimated dealer arrival</div>
+        <div class="eta-value" id="eta-value">—</div>
+        <div class="eta-detail" id="eta-detail">Based on current vessel position and route</div>
+      </div>
+    </div>
+
+    <!-- Skeleton while vessel detection runs -->
+    <div id="vessel-skeleton" class="vessel-skeleton" style="display:none;">
+      <div class="skel-line skel-label"></div>
+      <div class="skel-line skel-title"></div>
+      <div class="skel-line skel-meta"></div>
+      <div class="skel-status">
+        <div class="skel-spinner"></div>
+        <span>Locating vessel · checking departures and Toyota carriers…</span>
+      </div>
+    </div>
 
     <!-- Vessel tracking card (shown when vessel detected) -->
     <div id="vessel-info" class="vessel-card" style="display:none;">
@@ -1725,6 +1876,7 @@ TRACKER_PAGE = BASE + """
         <div class="vessel-card-main">
           <div class="vessel-card-label">
             <span class="vessel-pulse"></span>Vessel detected · Live
+            <span class="vessel-stale" id="vessel-stale" style="display:none;">Updated ?h ago</span>
           </div>
           <div class="vessel-card-name" id="vessel-name">—</div>
           <div class="vessel-card-meta">
@@ -1745,6 +1897,16 @@ TRACKER_PAGE = BASE + """
         <div class="vessel-card-side">
           <div class="vessel-card-mmsi">MMSI <span id="vessel-mmsi">—</span></div>
           <div class="vessel-card-source">Based on departure timing</div>
+        </div>
+      </div>
+      <!-- Voyage progress -->
+      <div class="voyage-progress">
+        <div class="voyage-head">
+          <span><span class="voyage-from" id="voyage-from">Origin</span> → <span class="voyage-to" id="voyage-to">Destination</span></span>
+          <span class="voyage-pct" id="voyage-pct">0%</span>
+        </div>
+        <div class="voyage-bar-bg">
+          <div class="voyage-bar" id="voyage-bar" style="width:0%;"></div>
         </div>
       </div>
       <div class="vessel-card-links" id="vessel-links"></div>
@@ -1960,6 +2122,12 @@ TRACKER_PAGE = BASE + """
       attribution:'&copy; OpenStreetMap &copy; CARTO',maxZoom:18
     }).addTo(map);
     var latlngs = stops.map(function(s){return[s.lat,s.lng];});
+    // Expose hub names for voyage-progress display
+    window.routeHubs = stops.map(function(s){
+      // Extract city name from "City, Country" — take first segment
+      var n = s.name || '';
+      return n.split(',')[0].trim() || 'Hub';
+    });
     if(latlngs.length > 1){
       L.polyline(latlngs,{color:'#e5001a',weight:2,dashArray:'6 6',opacity:.7}).addTo(map);
     }
@@ -1987,18 +2155,37 @@ TRACKER_PAGE = BASE + """
     {% endif %}
     {% if show_vessel %}
     var vesselMarker = null;
-    function loadVessel(mmsi, name, lat, lng, speed, course, dest, eta) {
+    var vesselPulse = null;
+    function loadVessel(mmsi, name, lat, lng, speed, course, dest, eta, ageMin) {
       if (vesselMarker) map.removeLayer(vesselMarker);
+      if (vesselPulse) map.removeLayer(vesselPulse);
+      // Rotation: AIS course (0-360°). Default 0 if missing.
+      var rot = (course != null && course !== '' && course !== 0) ? course : 0;
+      // Stale check: position > 3h old fades the icon
+      var isStale = ageMin != null && ageMin > 180;
+      var iconColor = isStale ? '#888' : '#e5001a';
+      var glowOpacity = isStale ? '0.25' : '0.75';
+      // SVG ship icon, rotates with course
+      var shipSvg =
+        '<svg viewBox="0 0 32 32" width="32" height="32" '+
+        'style="transform:rotate('+rot+'deg);filter:drop-shadow(0 0 8px rgba(229,0,26,'+glowOpacity+'));transition:transform .4s ease;">'+
+          '<defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1">'+
+            '<stop offset="0" stop-color="#ff5060"/><stop offset="1" stop-color="'+iconColor+'"/>'+
+          '</linearGradient></defs>'+
+          '<path d="M16 2 L22 14 L22 26 L10 26 L10 14 Z" fill="url(#sg)" stroke="#fff" stroke-width="1.5" stroke-linejoin="round"/>'+
+          '<circle cx="16" cy="11" r="1.5" fill="#fff"/>'+
+        '</svg>';
       var icon = L.divIcon({
         className:'',
         html:'<div style="position:relative;text-align:center;">' +
-             '<div style="font-size:24px;filter:drop-shadow(0 0 6px rgba(229,0,26,0.8));">🚢</div>' +
-             '<div style="position:absolute;top:26px;left:50%;transform:translateX(-50%);' +
-             'background:rgba(0,0,0,0.75);color:#fff;font-size:9px;font-weight:600;' +
-             'padding:1px 5px;border-radius:3px;white-space:nowrap;letter-spacing:.03em;' +
-             'border:1px solid rgba(229,0,26,0.5);">'+name+'</div>' +
+             shipSvg +
+             '<div style="position:absolute;top:34px;left:50%;transform:translateX(-50%);' +
+             'background:rgba(10,13,18,0.92);color:#fff;font-size:10px;font-weight:600;' +
+             'padding:2px 7px;border-radius:4px;white-space:nowrap;letter-spacing:.02em;' +
+             'border:1px solid '+(isStale?'rgba(136,136,136,0.5)':'rgba(229,0,26,0.5)')+';' +
+             'box-shadow:0 2px 6px rgba(0,0,0,0.4);">'+name+'</div>' +
              '</div>',
-        iconSize:[80,40],iconAnchor:[40,12]
+        iconSize:[80,52],iconAnchor:[16,16]
       });
       vesselMarker = L.marker([lat,lng],{icon:icon,zIndexOffset:1000}).addTo(map)
         .bindPopup(
@@ -2012,20 +2199,134 @@ TRACKER_PAGE = BASE + """
       var bounds = latlngs.length > 0 ? L.latLngBounds(latlngs) : L.latLngBounds([[lat,lng],[lat,lng]]);
       bounds.extend([lat, lng]);
       map.fitBounds(bounds, {padding:[30,30]});
-      // Add pulsing circle around vessel
-      L.circle([lat,lng],{
-        radius:200000,color:'#e5001a',fillColor:'#e5001a',
-        fillOpacity:0.05,weight:1,dashArray:'4 4'
-      }).addTo(map);
+      // Subtle pulsing circle around vessel (skip if stale)
+      if(!isStale){
+        vesselPulse = L.circle([lat,lng],{
+          radius:200000,color:'#e5001a',fillColor:'#e5001a',
+          fillOpacity:0.04,weight:1,dashArray:'4 4'
+        }).addTo(map);
+      }
       // Show vessel info card
       var card = document.getElementById('vessel-info');
+      var skeleton = document.getElementById('vessel-skeleton');
+      if(skeleton) skeleton.style.display='none';
       if(card){
         document.getElementById('vessel-name').textContent = name;
         document.getElementById('vessel-speed').textContent = speed+' knots';
         document.getElementById('vessel-dest').textContent = dest||'—';
         document.getElementById('vessel-mmsi').textContent = mmsi;
+        // Stale badge
+        var staleEl = document.getElementById('vessel-stale');
+        if(staleEl){
+          if(isStale){
+            var hrs = Math.floor(ageMin/60);
+            staleEl.textContent = 'Updated '+hrs+'h ago';
+            staleEl.style.display = 'inline-flex';
+          } else {
+            staleEl.style.display = 'none';
+          }
+        }
+        // Voyage progress line
+        renderVoyageProgress(lat, lng, dest);
+        // ETA estimate banner
+        renderEtaBanner(lat, lng);
         card.style.display='block';
       }
+    }
+
+    // ETA: given current vessel position and route, estimate arrival at final dealer
+    function renderEtaBanner(lat, lng){
+      var banner = document.getElementById('eta-banner');
+      var valEl = document.getElementById('eta-value');
+      var detEl = document.getElementById('eta-detail');
+      if(!banner || !latlngs || latlngs.length < 2) return;
+      // Compute total route distance + traveled distance
+      function dist(a,b){
+        var R=6371,dLat=(b[0]-a[0])*Math.PI/180,dLon=(b[1]-a[1])*Math.PI/180;
+        var x=Math.sin(dLat/2)**2+Math.cos(a[0]*Math.PI/180)*Math.cos(b[0]*Math.PI/180)*Math.sin(dLon/2)**2;
+        return 2*R*Math.asin(Math.sqrt(x));
+      }
+      var totalKm=0;
+      for(var i=1;i<latlngs.length;i++) totalKm += dist(latlngs[i-1],latlngs[i]);
+      // Find closest segment to vessel
+      var bestProgress=0, bestD=Infinity, cumKm=0;
+      for(var i=1;i<latlngs.length;i++){
+        var segKm=dist(latlngs[i-1],latlngs[i]);
+        var d=Math.min(dist([lat,lng],latlngs[i-1]),dist([lat,lng],latlngs[i]));
+        if(d<bestD){
+          bestD=d;
+          var dStart=dist([lat,lng],latlngs[i-1]);
+          var dEnd=dist([lat,lng],latlngs[i]);
+          bestProgress=cumKm+segKm*(dStart/(dStart+dEnd));
+        }
+        cumKm+=segKm;
+      }
+      var remainingKm=totalKm-bestProgress;
+      // Average speeds (deep sea PCC ~17kn = 31 km/h; Baltic feeders ~15kn = 28 km/h; truck ~60km/h but short)
+      // Assume deep sea for most of remaining + 3 days port dwells per remaining hub
+      // Conservative: ~600 km/day average including port stops (PCC 17kn × 24h × 0.8 efficiency = ~650 km/day, minus dwells)
+      var kmPerDay = 550;
+      var daysRemaining = remainingKm/kmPerDay;
+      // Add fixed buffer for hub-leg transitions (Zeebrugge→Malmö→Paldiski→Truck): ~5 days total dwell
+      // But only if we're still upstream of those hubs (more than 1000km remaining)
+      if(remainingKm > 1000) daysRemaining += 5;
+      else if(remainingKm > 200) daysRemaining += 2;
+      var arriveMs=Date.now()+daysRemaining*86400000;
+      var arrive=new Date(arriveMs);
+      var earlyArrive=new Date(arriveMs-3*86400000);
+      var lateArrive=new Date(arriveMs+3*86400000);
+      function fmt(d){ return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
+      valEl.textContent = fmt(earlyArrive)+' – '+fmt(lateArrive);
+      var fullYear = arrive.toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'});
+      detEl.textContent = 'Most likely '+fullYear+' · '+
+                          remainingKm.toFixed(0)+' km remaining · '+
+                          Math.round(daysRemaining)+' days';
+      banner.style.display='flex';
+    }
+
+    // Voyage progress: shows progress from last hub to next hub based on lat/lng
+    function renderVoyageProgress(lat, lng, destText){
+      var bar = document.getElementById('voyage-bar');
+      var fromEl = document.getElementById('voyage-from');
+      var toEl = document.getElementById('voyage-to');
+      var pctEl = document.getElementById('voyage-pct');
+      if(!bar) return;
+      // Use route waypoints (latlngs) to compute progress
+      if(!latlngs || latlngs.length < 2){ return; }
+      // Find which segment the vessel is closest to, by projecting onto each
+      function dist(a,b){
+        var R=6371,dLat=(b[0]-a[0])*Math.PI/180,dLon=(b[1]-a[1])*Math.PI/180;
+        var x=Math.sin(dLat/2)**2+Math.cos(a[0]*Math.PI/180)*Math.cos(b[0]*Math.PI/180)*Math.sin(dLon/2)**2;
+        return 2*R*Math.asin(Math.sqrt(x));
+      }
+      // Total route distance
+      var totalKm=0, segs=[];
+      for(var i=1;i<latlngs.length;i++){
+        var d=dist(latlngs[i-1],latlngs[i]);
+        segs.push({from:latlngs[i-1],to:latlngs[i],km:d,start:totalKm});
+        totalKm+=d;
+      }
+      // Find closest segment to vessel by min distance to either endpoint
+      var bestSeg=segs[0], bestD=Infinity;
+      for(var s of segs){
+        var d = Math.min(dist([lat,lng],s.from), dist([lat,lng],s.to));
+        if(d<bestD){bestD=d;bestSeg=s;}
+      }
+      // Progress within best segment: how close to start vs end
+      var dFromStart=dist([lat,lng],bestSeg.from);
+      var dToEnd=dist([lat,lng],bestSeg.to);
+      var segProgress = dFromStart/(dFromStart+dToEnd);
+      var traveledKm = bestSeg.start + bestSeg.km*segProgress;
+      var pct = Math.max(0, Math.min(100, (traveledKm/totalKm)*100));
+      // Find hub names
+      var fromIdx = segs.indexOf(bestSeg);
+      var toIdx = fromIdx + 1;
+      var fromName = (window.routeHubs && window.routeHubs[fromIdx]) || 'Origin';
+      var toName = (window.routeHubs && window.routeHubs[toIdx]) || 'Destination';
+      bar.style.width = pct.toFixed(1)+'%';
+      fromEl.textContent = fromName;
+      toEl.textContent = toName;
+      pctEl.textContent = pct.toFixed(0)+'%';
     }
 
     // Auto-detect vessel — only if date is reliable or vessel already known
@@ -2062,12 +2363,26 @@ TRACKER_PAGE = BASE + """
         var dateReliable = hasUserDate || hasKnownVessel || (logins >= 2 && loginGap <= 3);
 
         if(hash){
+          // Show skeleton while detection runs
+          var skel = document.getElementById('vessel-skeleton');
+          if(skel) skel.style.display='block';
           // Always use API — it handles leg-aware cache correctly
           // Never use localStorage MMSI directly as it may be stale/wrong leg
           fetch('/api/vessel-detect/'+hash+'?leg='+leg)
             .then(r=>r.json())
-            .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta); })
-            .catch(()=>{});
+            .then(d=>{
+              if(skel) skel.style.display='none';
+              if(d.lat){
+                // Compute ageMin from updated timestamp
+                var ageMin = null;
+                if(d.updated){
+                  var t = new Date(d.updated.replace(' ','T')+'Z');
+                  if(!isNaN(t)) ageMin = Math.floor((Date.now()-t.getTime())/60000);
+                }
+                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin);
+              }
+            })
+            .catch(()=>{ if(skel) skel.style.display='none'; });
           // Show prompt if date unreliable and no vessel known
           if(!dateReliable){
             var prompt = document.getElementById('vessel-date-prompt');
@@ -2078,10 +2393,22 @@ TRACKER_PAGE = BASE + """
       .catch(function(){
         // Fallback — try detection anyway
         if(hash){
+          var skel2 = document.getElementById('vessel-skeleton');
+          if(skel2) skel2.style.display='block';
           fetch('/api/vessel-detect/'+hash)
             .then(r=>r.json())
-            .then(d=>{ if(d.lat) loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta); })
-            .catch(()=>{});
+            .then(d=>{
+              if(skel2) skel2.style.display='none';
+              if(d.lat){
+                var ageMin = null;
+                if(d.updated){
+                  var t = new Date(d.updated.replace(' ','T')+'Z');
+                  if(!isNaN(t)) ageMin = Math.floor((Date.now()-t.getTime())/60000);
+                }
+                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin);
+              }
+            })
+            .catch(()=>{ if(skel2) skel2.style.display='none'; });
         }
       });
     {% endif %}
