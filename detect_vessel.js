@@ -1,4 +1,5 @@
-const{chromium}=require("playwright");
+// Playwright loaded lazily — only when we actually need to launch a browser.
+// For fast path (position-only via shipinfo), we never touch the browser.
 const E=process.env.MST_EMAIL||"";
 const P=process.env.MST_PASSWORD||"";
 const D=process.argv[2];   // leftTheFactory date OR visited date for intermediate legs
@@ -252,6 +253,90 @@ function getShipFinderPosition(mmsi) {
 }
 
 (async()=>{
+
+// Helper: fetch position via shipinfo.net satellite AIS (pure HTTP, no browser).
+// Defined inside the IIFE-adjacent scope so the fast-path block below can use it.
+async function getShipinfoPosition(mmsi, imo){
+  try {
+    var url = 'https://shipinfo.net/topos/api/vessel/track?days=3&imo='+(imo||'')+'&mmsi='+mmsi;
+    var resp = await fetch(url);
+    var data = await resp.json();
+    var pts = Array.isArray(data) ? data : (data.data || data.points || []);
+    if(pts.length === 0) return null;
+    pts.sort(function(a,b){ return new Date(a.updated) - new Date(b.updated); });
+    var last = pts[pts.length-1];
+    if(!last.lat || !last.lng) return null;
+    var ageMin = Math.round((Date.now() - new Date(last.updated).getTime())/60000);
+    return {
+      lat: last.lat, lon: last.lng,
+      speed: last.speed_kn != null ? last.speed_kn : null,
+      course: (last.course_deg != null ? last.course_deg
+               : (last.heading_deg != null ? last.heading_deg : null)),
+      dest: (last.destination && last.destination.trim()) ? last.destination.trim() : null,
+      eta: (last.eta && last.eta.trim()) ? last.eta.trim() : null,
+      ageMin: ageMin, source: 'shipinfo'
+    };
+  } catch(e) {
+    process.stderr.write('shipinfo position fetch failed: '+e.message+'\n');
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// FAST PATH: Position-only mode (called by web.py to refresh vessel position).
+// When MMSI is provided and D is "dummy" (no detection needed), skip Chromium
+// entirely and fetch position via pure HTTP from shipinfo.net → ShipFinder.
+// This turns 15-25s browser-based refresh into 1-2s HTTP fetch.
+// MST scrape was only ever needed for vessel DETECTION; for known MMSIs we
+// can get lat/lon/course/dest/eta from shipinfo without any login.
+// ─────────────────────────────────────────────────────────────────────────
+if(MMSI && (D === 'dummy' || !D)){
+  var result = { mmsi: MMSI, matches: [{ mmsi: MMSI, vessel: TOYOTA_CARRIERS[MMSI]||"", time:"" }] };
+  process.stderr.write("Fast path: position-only mode for MMSI "+MMSI+"\n");
+  // Try shipinfo first (satellite AIS — works everywhere)
+  var siPos = await getShipinfoPosition(MMSI, VESSEL_IMO[MMSI]||'');
+  if(siPos && siPos.lat){
+    process.stderr.write("shipinfo: lat="+siPos.lat+" lon="+siPos.lon+" age="+siPos.ageMin+"min\n");
+    result.position = {
+      lat: siPos.lat, lon: siPos.lon,
+      speed: siPos.speed != null ? siPos.speed : 0,
+      course: siPos.course,
+      dest: siPos.dest || null,
+      eta: siPos.eta || null,
+      ageMin: siPos.ageMin,
+      name: TOYOTA_CARRIERS[MMSI]||"",
+      source: "shipinfo"
+    };
+  }
+  // If shipinfo is missing or stale (>3h), try ShipFinder
+  if(!result.position || result.position.ageMin > 180){
+    process.stderr.write("Trying ShipFinder fallback...\n");
+    var sfPos = await getShipFinderPosition(MMSI);
+    if(sfPos && sfPos.lat){
+      process.stderr.write("ShipFinder: lat="+sfPos.lat+" lon="+sfPos.lon+"\n");
+      if(!result.position || (sfPos.ageMin != null && sfPos.ageMin < result.position.ageMin)){
+        result.position = {
+          lat: sfPos.lat, lon: sfPos.lon,
+          speed: sfPos.speed != null ? sfPos.speed : 0,
+          course: sfPos.course,
+          dest: (result.position && result.position.dest) || sfPos.dest || null,
+          eta: (result.position && result.position.eta) || null,
+          ageMin: sfPos.ageMin,
+          name: TOYOTA_CARRIERS[MMSI]||"",
+          source: "shipfinder"
+        };
+      }
+    }
+  }
+  process.stdout.write(JSON.stringify(result)+"\n");
+  return;  // Done — no browser was launched
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SLOW PATH: Full detection (browser scrape + reverse-lookup).
+// Only runs when we don't have an MMSI yet (initial vessel detection).
+// ─────────────────────────────────────────────────────────────────────────
+const {chromium} = require("playwright");
 const br=await chromium.launch({
   headless: true,
   args: [
@@ -752,34 +837,6 @@ if(MMSI){
     result.mmsi=matches[0].mmsi;
     // Pass berth_verified flag through so web.py can lock the detection
     result.berth_verified = matches[0].berthConfirmed === true;
-  }
-}
-
-// Fetch freshest position from shipinfo.net satellite AIS track
-// (often fresher than MST/ShipFinder for deep-sea vessels)
-async function getShipinfoPosition(mmsi, imo){
-  try {
-    var url = 'https://shipinfo.net/topos/api/vessel/track?days=3&imo='+(imo||'')+'&mmsi='+mmsi;
-    var resp = await fetch(url);
-    var data = await resp.json();
-    var pts = Array.isArray(data) ? data : (data.data || data.points || []);
-    if(pts.length === 0) return null;
-    pts.sort(function(a,b){ return new Date(a.updated) - new Date(b.updated); });
-    var last = pts[pts.length-1];
-    if(!last.lat || !last.lng) return null;
-    var ageMin = Math.round((Date.now() - new Date(last.updated).getTime())/60000);
-    return {
-      lat: last.lat, lon: last.lng,
-      speed: last.speed_kn != null ? last.speed_kn : null,
-      course: (last.course_deg != null ? last.course_deg
-               : (last.heading_deg != null ? last.heading_deg : null)),
-      dest: (last.destination && last.destination.trim()) ? last.destination.trim() : null,
-      eta: (last.eta && last.eta.trim()) ? last.eta.trim() : null,
-      ageMin: ageMin, source: 'shipinfo'
-    };
-  } catch(e) {
-    process.stderr.write('shipinfo position fetch failed: '+e.message+'\n');
-    return null;
   }
 }
 

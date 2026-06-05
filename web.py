@@ -3089,11 +3089,17 @@ def api_vessel_detect(order_hash):
                 SELECT CAST((julianday('now') - julianday(vessel_updated)) * 24 AS INTEGER)
                 FROM checks WHERE order_hash=? AND vessel_mmsi=? LIMIT 1
             """, (order_hash, mmsi)).fetchone()
-            # Berth-verified vessels: never re-detect, only refresh position every 6h
-            # Unverified vessels: re-detect after 6h (detection may have been wrong)
-            # NULL age (no timestamp yet) = treat as stale so it refreshes.
+            # Position freshness check at minute granularity (24*60 = 1440 min/day)
+            pos_age_min = db.execute("""
+                SELECT CAST((julianday('now') - julianday(vessel_updated)) * 1440 AS INTEGER)
+                FROM checks WHERE order_hash=? AND vessel_mmsi=? LIMIT 1
+            """, (order_hash, mmsi)).fetchone()
+            # Berth-verified vessels: never re-detect, only refresh position
+            # Unverified vessels: re-detect identity after 6h (may have been wrong)
+            # Position is now cheap to refresh (shipinfo HTTP fast-path, ~1s), so we
+            # refresh aggressively: stale after 30 minutes instead of 6 hours.
             stale_identity = (not berth_verified) and (age is None or age[0] is None or age[0] > 6)
-            stale_position = (pos_age is None or pos_age[0] is None or pos_age[0] > 6)
+            stale_position = (pos_age_min is None or pos_age_min[0] is None or pos_age_min[0] > 30)
 
             if not stale_identity:
                 # Serve from checks position cache if position is fresh
