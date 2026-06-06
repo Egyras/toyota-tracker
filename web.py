@@ -3110,18 +3110,23 @@ def api_vessel_detect(order_hash):
                     LIMIT 1
                 """, (order_hash, mmsi)).fetchone()
                 if cached and cached["vessel_lat"] and not stale_position:
-                    return jsonify({
-                        "mmsi":        cached["vessel_mmsi"],
-                        "name":        cached["vessel_name"],
-                        "lat":         float(cached["vessel_lat"]),
-                        "lon":         float(cached["vessel_lon"]),
-                        "speed":       float(cached["vessel_speed"] or 0),
-                        "course":      (float(cached["vessel_course"]) if cached["vessel_course"] not in (None, 0, 0.0) else None),
-                        "destination": cached["vessel_dest"] or "",
-                        "eta":         cached["vessel_eta"] or "",
-                        "cached":      True, "leg": leg_override,
-                        "berth_verified": bool(berth_verified),
-                    })
+                    # If we have fresh position but NULL dest/eta, force a refresh
+                    # to backfill them — likely a leftover from before fast-path fix.
+                    if not cached["vessel_dest"] and not cached["vessel_eta"]:
+                        pass  # fall through to refresh below
+                    else:
+                        return jsonify({
+                            "mmsi":        cached["vessel_mmsi"],
+                            "name":        cached["vessel_name"],
+                            "lat":         float(cached["vessel_lat"]),
+                            "lon":         float(cached["vessel_lon"]),
+                            "speed":       float(cached["vessel_speed"] or 0),
+                            "course":      (float(cached["vessel_course"]) if cached["vessel_course"] not in (None, 0, 0.0) else None),
+                            "destination": cached["vessel_dest"] or "",
+                            "eta":         cached["vessel_eta"] or "",
+                            "cached":      True, "leg": leg_override,
+                            "berth_verified": bool(berth_verified),
+                        })
                 # Position stale — refresh position only, keep vessel identity
                 pos = get_vessel_position(mmsi)
                 if pos:
