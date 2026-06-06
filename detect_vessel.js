@@ -1,5 +1,5 @@
-// Playwright loaded lazily — only when we actually need to launch a browser.
-// For fast path (position-only via shipinfo), we never touch the browser.
+// Playwright loaded lazily — only in the slow path (full detection).
+// Fast path (position-only) uses pure HTTP and never touches the browser.
 const E=process.env.MST_EMAIL||"";
 const P=process.env.MST_PASSWORD||"";
 const D=process.argv[2];   // leftTheFactory date OR visited date for intermediate legs
@@ -254,8 +254,12 @@ function getShipFinderPosition(mmsi) {
 
 (async()=>{
 
-// Helper: fetch position via shipinfo.net satellite AIS (pure HTTP, no browser).
-// Defined inside the IIFE-adjacent scope so the fast-path block below can use it.
+// ─────────────────────────────────────────────────────────────────────────
+// HELPERS — used by both fast and slow paths.
+// Defined at IIFE-top scope so they're hoisted for use anywhere below.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Fetch position via shipinfo.net satellite AIS (pure HTTP, no browser).
 async function getShipinfoPosition(mmsi, imo){
   try {
     var url = 'https://shipinfo.net/topos/api/vessel/track?days=3&imo='+(imo||'')+'&mmsi='+mmsi;
@@ -282,33 +286,120 @@ async function getShipinfoPosition(mmsi, imo){
   }
 }
 
+// Fetch MST vessel DETAIL page via plain HTTPS (no browser, no login).
+// The detail page is publicly accessible — login is only needed for the port
+// arrivals/departures listing. This restores dest/ETA in the fast path.
+async function getMstDetailHttp(mmsi, imo, name){
+  return new Promise(function(resolve){
+    try {
+      var https = require('https');
+      var slug = (name || TOYOTA_CARRIERS[mmsi] || 'vessel')
+                   .toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+      var path = '/vessels/'+slug+'-mmsi-'+mmsi+(imo?('-imo-'+imo):'');
+      var opts = {
+        hostname: 'www.myshiptracking.com',
+        path: path,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml',
+          'Accept-Language': 'en-US,en;q=0.9'
+        },
+        timeout: 10000
+      };
+      var req = https.get(opts, function(res){
+        if(res.statusCode !== 200){
+          process.stderr.write('MST detail HTTP '+res.statusCode+'\n');
+          return resolve(null);
+        }
+        var body = '';
+        res.on('data', function(c){ body += c; });
+        res.on('end', function(){
+          try {
+            // Collect ALL "myst-arrival-cont" h3 contents; the LAST one is the
+            // next destination (first is the previous/current port).
+            var dest = null;
+            var arrivalRe = /<h3 class="text-truncate m-1">([\s\S]*?)<\/h3>/g;
+            var matches = [];
+            var m;
+            while((m = arrivalRe.exec(body)) !== null){
+              var text = m[1].replace(/<[^>]+>/g,'').replace(/\s+/g,' ').trim();
+              if(text) matches.push(text);
+            }
+            if(matches.length > 0) dest = matches[matches.length - 1];
+
+            // ETA: try several patterns MST uses
+            var eta = null;
+            var etaPatterns = [
+              /ETA[\s\S]{0,300}?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?:\s*UTC)?)/i,
+              /ETA[\s\S]{0,300}?<span class="line">(\d{4}-\d{2}-\d{2})<\/span>/i,
+              /ETA[\s\S]{0,400}?(\d{4}-\d{2}-\d{2})/i
+            ];
+            for(var pi=0; pi<etaPatterns.length; pi++){
+              var em = body.match(etaPatterns[pi]);
+              if(em){ eta = em[1].trim(); break; }
+            }
+
+            if(dest || eta){
+              process.stderr.write('MST detail (http): dest='+dest+' eta='+eta+'\n');
+              resolve({ dest: dest, eta: eta });
+            } else {
+              process.stderr.write('MST detail (http): no dest/eta found in body\n');
+              resolve(null);
+            }
+          } catch(e){
+            process.stderr.write('MST detail parse failed: '+e.message+'\n');
+            resolve(null);
+          }
+        });
+      });
+      req.on('error', function(e){
+        process.stderr.write('MST detail fetch failed: '+e.message+'\n');
+        resolve(null);
+      });
+      req.on('timeout', function(){
+        req.destroy();
+        process.stderr.write('MST detail fetch timeout\n');
+        resolve(null);
+      });
+    } catch(e){
+      process.stderr.write('MST detail outer error: '+e.message+'\n');
+      resolve(null);
+    }
+  });
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // FAST PATH: Position-only mode (called by web.py to refresh vessel position).
 // When MMSI is provided and D is "dummy" (no detection needed), skip Chromium
-// entirely and fetch position via pure HTTP from shipinfo.net → ShipFinder.
-// This turns 15-25s browser-based refresh into 1-2s HTTP fetch.
-// MST scrape was only ever needed for vessel DETECTION; for known MMSIs we
-// can get lat/lon/course/dest/eta from shipinfo without any login.
+// entirely and fetch position + dest/ETA via parallel HTTP requests.
+// Turns 15-25s browser refresh into ~1s HTTP fetch.
 // ─────────────────────────────────────────────────────────────────────────
 if(MMSI && (D === 'dummy' || !D)){
   var result = { mmsi: MMSI, matches: [{ mmsi: MMSI, vessel: TOYOTA_CARRIERS[MMSI]||"", time:"" }] };
   process.stderr.write("Fast path: position-only mode for MMSI "+MMSI+"\n");
-  // Try shipinfo first (satellite AIS — works everywhere)
-  var siPos = await getShipinfoPosition(MMSI, VESSEL_IMO[MMSI]||'');
+  // Parallel fetch — both shipinfo and MST detail at the same time
+  var imo = VESSEL_IMO[MMSI] || '';
+  var name = TOYOTA_CARRIERS[MMSI] || '';
+  var [siPos, mstDetail] = await Promise.all([
+    getShipinfoPosition(MMSI, imo),
+    getMstDetailHttp(MMSI, imo, name)
+  ]);
   if(siPos && siPos.lat){
     process.stderr.write("shipinfo: lat="+siPos.lat+" lon="+siPos.lon+" age="+siPos.ageMin+"min\n");
     result.position = {
       lat: siPos.lat, lon: siPos.lon,
       speed: siPos.speed != null ? siPos.speed : 0,
       course: siPos.course,
-      dest: siPos.dest || null,
-      eta: siPos.eta || null,
+      // Prefer MST's parsed dest/ETA (cleaner labels like "SG SIN PEBGA"),
+      // fall back to AIS DESTINATION text from shipinfo if MST has none.
+      dest: (mstDetail && mstDetail.dest) || siPos.dest || null,
+      eta:  (mstDetail && mstDetail.eta)  || siPos.eta  || null,
       ageMin: siPos.ageMin,
-      name: TOYOTA_CARRIERS[MMSI]||"",
+      name: name,
       source: "shipinfo"
     };
   }
-  // If shipinfo is missing or stale (>3h), try ShipFinder
+  // If shipinfo missing or stale (>3h), try ShipFinder
   if(!result.position || result.position.ageMin > 180){
     process.stderr.write("Trying ShipFinder fallback...\n");
     var sfPos = await getShipFinderPosition(MMSI);
@@ -319,17 +410,17 @@ if(MMSI && (D === 'dummy' || !D)){
           lat: sfPos.lat, lon: sfPos.lon,
           speed: sfPos.speed != null ? sfPos.speed : 0,
           course: sfPos.course,
-          dest: (result.position && result.position.dest) || sfPos.dest || null,
-          eta: (result.position && result.position.eta) || null,
+          dest: (mstDetail && mstDetail.dest) || (result.position && result.position.dest) || sfPos.dest || null,
+          eta:  (mstDetail && mstDetail.eta)  || (result.position && result.position.eta)  || null,
           ageMin: sfPos.ageMin,
-          name: TOYOTA_CARRIERS[MMSI]||"",
+          name: name,
           source: "shipfinder"
         };
       }
     }
   }
   process.stdout.write(JSON.stringify(result)+"\n");
-  return;  // Done — no browser was launched
+  return;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
