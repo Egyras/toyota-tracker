@@ -2422,17 +2422,25 @@ TRACKER_PAGE = BASE + """
         return null;
       }
       // Route-type aware multiplier — actual sea distance / great-circle.
-      // Calibrated against known sea distances (Searoutes data).
+      // CALIBRATED against real observed voyages of Toyota carriers from shipinfo.net
+      // 120-day tracks (Bishu, Triton, Cepheus, Hamburg). See research notes.
       function routeMultiplier(fromCoords, toCoords){
         var fr = portRegion(fromCoords), to = portRegion(toCoords);
         if(!fr || !to) return 1.8;
-        if(fr === to) return 1.15;                       // intra-region, mostly coastal
-        if(fr === 'asia' && to === 'mediterranean') return 1.4;  // via Suez, mostly direct
-        if(fr === 'mediterranean' && to === 'asia') return 1.4;
-        if(fr === 'asia' && to === 'northern') return 1.65;  // Suez+Med+Atlantic+Channel
-        if(fr === 'northern' && to === 'asia') return 1.65;
-        if(fr === 'mediterranean' && to === 'northern') return 3.5; // long backtrack via Gibraltar
-        if(fr === 'northern' && to === 'mediterranean') return 3.5;
+        if(fr === to) return 1.15;
+        // Asia → Med via Suez: observed Bishu Singapore→Derince = 33.5d at ~14 kn = 11000+ km actual
+        // Great-circle Singapore→Derince = 8500 km. Ratio: 1.3-1.4x. But we need TIME accuracy,
+        // and ships go slower than nominal speed in this leg (Suez transit, traffic). Use 1.7x.
+        if(fr === 'asia' && to === 'mediterranean') return 1.7;
+        if(fr === 'mediterranean' && to === 'asia') return 1.7;
+        // Asia → Northern Europe: observed Triton Singapore→Sagunto (28d) + Sagunto→Zeebrugge (11.7d)
+        // = ~40 days for full Asia→Northern. Calibrated multiplier ~1.85x.
+        if(fr === 'asia' && to === 'northern') return 1.85;
+        if(fr === 'northern' && to === 'asia') return 1.85;
+        // Med → Northern via Gibraltar+Channel: with 0.70 efficiency,
+        // Triton Sagunto→Zee (11.7d) and Bishu Piraeus→Zee (11.1d) calibrate to 2.0-2.3x.
+        if(fr === 'mediterranean' && to === 'northern') return 2.2;
+        if(fr === 'northern' && to === 'mediterranean') return 2.2;
         return 1.8;
       }
 
@@ -2459,8 +2467,12 @@ TRACKER_PAGE = BASE + """
       }
 
       // Compute daysRemaining
-      var kmPerDay = (speed && speed > 5) ? Math.round(speed * 1.852 * 24 * 0.85) : 550;
-      kmPerDay = Math.max(350, Math.min(780, kmPerDay));
+      // Speed efficiency 0.70: real port-to-port voyages include Suez transit, Strait of
+      // Malacca, Gibraltar funnel, port approach maneuvering, and occasional bunker stops.
+      // Real observed avg = 11-13 kn effective for nominally 14-17 kn ships. (Bishu Feb-Mar 2026
+      // Singapore→Derince = 33.5d for ~12000 km actual = ~358 km/day = ~9.6 kn effective.)
+      var kmPerDay = (speed && speed > 5) ? Math.round(speed * 1.852 * 24 * 0.70) : 450;
+      kmPerDay = Math.max(280, Math.min(640, kmPerDay));
       var daysRemaining;
       var detourEtaAnchor = null;
 
@@ -2487,9 +2499,13 @@ TRACKER_PAGE = BASE + """
           remainingAfterNext += sk * m;
         }
         var remainingAfterDays = remainingAfterNext / kmPerDay;
-        // Dwell: 2.5d at detour + 3.5d per planned hub (feeder waits + customs) + 0.5d truck
+        // Dwell budget — calibrated from real voyages:
+        //   Bishu Zeebrugge 2.3d, Triton Zeebrugge 7.1d → avg ~5d at major hub
+        //   Plus ~3.5d wait for feeder departure at each downstream hub
+        // 2.5d at detour port (Derince) + 5d at first European hub (Zeebrugge) +
+        // 3.5d per subsequent feeder hub + 0.5d truck
         var plannedHubsAhead = latlngs.length - bestSegEndIdx - 1;
-        var dwellDays = 2.5 + plannedHubsAhead * 3.5 + 0.5;
+        var dwellDays = 2.5 + 5.0 + Math.max(0, plannedHubsAhead - 1) * 3.5 + 0.5;
         if(detourEtaAnchor){
           var daysToDetour = (detourEtaAnchor - Date.now()) / 86400000;
           daysRemaining = daysToDetour + detourToNextDays + remainingAfterDays + dwellDays;
