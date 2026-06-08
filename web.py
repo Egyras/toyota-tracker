@@ -2407,12 +2407,35 @@ TRACKER_PAGE = BASE + """
       if(correctedRemainingKm < 1) correctedRemainingKm = remainingKm;
 
       // ───────── DETOUR DETECTION ─────────
-      // If the vessel's AIS DESTINATION is a known port NOT close to any planned hub,
-      // the vessel is making an off-route stop. We use TWO sources to estimate:
-      //  1. MST's published ETA to that stop (if available — usually accurate)
-      //  2. Heuristic for "detour-to-next-planned-hub" sail time (great-circle × 2.5)
-      // This is much more accurate than re-estimating sail time, especially for
-      // long Mediterranean-to-Northern Europe voyages.
+      // If vessel's AIS DESTINATION is in a different SEA REGION than the planned
+      // final destination, it's making a detour (e.g., Med port like Derince while
+      // final destination is Northern Europe like Vilnius). We can't use great-circle
+      // distance because Asia→Europe great-circles cut through landmass (Eurasia),
+      // misleadingly suggesting Derince is "on the way" to Zeebrugge.
+      function portRegion(coords){
+        if(!coords) return null;
+        var lat = coords[0], lon = coords[1];
+        if(lat >= 50 && lat <= 65 && lon >= -10 && lon <= 35) return 'northern';
+        if(lat >= 30 && lat <= 47 && lon >= -6 && lon <= 42) return 'mediterranean';
+        if(lat >= 0 && lat <= 50 && lon >= 95 && lon <= 145) return 'asia';
+        if(lat >= 20 && lat <= 36 && lon >= -18 && lon <= -10) return 'canaries';
+        return null;
+      }
+      // Route-type aware multiplier — actual sea distance / great-circle.
+      // Calibrated against known sea distances (Searoutes data).
+      function routeMultiplier(fromCoords, toCoords){
+        var fr = portRegion(fromCoords), to = portRegion(toCoords);
+        if(!fr || !to) return 1.8;
+        if(fr === to) return 1.15;                       // intra-region, mostly coastal
+        if(fr === 'asia' && to === 'mediterranean') return 1.4;  // via Suez, mostly direct
+        if(fr === 'mediterranean' && to === 'asia') return 1.4;
+        if(fr === 'asia' && to === 'northern') return 1.65;  // Suez+Med+Atlantic+Channel
+        if(fr === 'northern' && to === 'asia') return 1.65;
+        if(fr === 'mediterranean' && to === 'northern') return 3.5; // long backtrack via Gibraltar
+        if(fr === 'northern' && to === 'mediterranean') return 3.5;
+        return 1.8;
+      }
+
       var detourPort = null;
       var detourCoords = null;
       var detourActive = false;
@@ -2424,13 +2447,10 @@ TRACKER_PAGE = BASE + """
             if(dist(detourCoords, latlngs[pi]) < 150){ matchesPlannedHub = true; break; }
           }
           if(!matchesPlannedHub){
-            var nextHub = latlngs[bestSegEndIdx];
-            var directKm = dist([lat,lng], nextHub);
-            var detourKm = dist([lat,lng], detourCoords) + dist(detourCoords, nextHub);
-            var extra = detourKm - directKm;
-            // Only treat as a real detour if it adds >500 km of travel
-            // (filters out roughly-on-the-way bunkering stops like Singapore)
-            if(extra > 500){
+            // Region check is the reliable detour test
+            var detourRegion = portRegion(detourCoords);
+            var finalRegion = portRegion(latlngs[latlngs.length - 1]);
+            if(detourRegion && finalRegion && detourRegion !== finalRegion){
               detourPort = dest;
               detourActive = true;
             }
@@ -2442,21 +2462,22 @@ TRACKER_PAGE = BASE + """
       var kmPerDay = (speed && speed > 5) ? Math.round(speed * 1.852 * 24 * 0.85) : 550;
       kmPerDay = Math.max(350, Math.min(780, kmPerDay));
       var daysRemaining;
-      var calcMode = '';
       var detourEtaAnchor = null;
 
       if(detourActive){
-        // Try to use MST's ETA to the detour stop as a strong anchor
+        // AIS ETA is reliable as anchor ONLY if more than 24h in future
+        // (otherwise it's likely stale — set for a previous waypoint the ship already passed)
         if(eta){
           var anchorDate = new Date(eta.replace(' UTC','Z').replace(/^(\d{4}-\d{2}-\d{2}) /,'$1T'));
-          if(!isNaN(anchorDate.getTime()) && anchorDate > Date.now()){
+          if(!isNaN(anchorDate.getTime()) && (anchorDate.getTime() - Date.now()) > 86400000){
             detourEtaAnchor = anchorDate;
           }
         }
         var nextHubD = latlngs[bestSegEndIdx];
-        // Detour → next planned hub: use 2.5× great-circle (realistic for Med→N.Europe sea routes
-        // that have to navigate confined seas, Gibraltar, Channel, etc.)
-        var detourToNextKm = dist(detourCoords, nextHubD) * 2.5;
+        // Use route-aware multipliers for the detour leg
+        var multToDetour = routeMultiplier([lat,lng], detourCoords);
+        var multDetourToNext = routeMultiplier(detourCoords, nextHubD);
+        var detourToNextKm = dist(detourCoords, nextHubD) * multDetourToNext;
         var detourToNextDays = detourToNextKm / kmPerDay;
         // Remaining planned route AFTER reaching the next hub
         var remainingAfterNext = 0;
@@ -2466,31 +2487,24 @@ TRACKER_PAGE = BASE + """
           remainingAfterNext += sk * m;
         }
         var remainingAfterDays = remainingAfterNext / kmPerDay;
-        // Dwell budget: 2.5d at detour + 3.5d per planned hub (feeder waits + customs) + 0.5d truck
-        var plannedHubsAhead = latlngs.length - bestSegEndIdx - 1;  // exclude final dealer
+        // Dwell: 2.5d at detour + 3.5d per planned hub (feeder waits + customs) + 0.5d truck
+        var plannedHubsAhead = latlngs.length - bestSegEndIdx - 1;
         var dwellDays = 2.5 + plannedHubsAhead * 3.5 + 0.5;
         if(detourEtaAnchor){
-          // Anchor on MST ETA
           var daysToDetour = (detourEtaAnchor - Date.now()) / 86400000;
           daysRemaining = daysToDetour + detourToNextDays + remainingAfterDays + dwellDays;
-          calcMode = 'anchored';
         } else {
-          // No MST ETA — estimate sail time to detour from current position
-          var toDetourKm = dist([lat,lng], detourCoords) * 2.1;
-          var daysToDetour = toDetourKm / kmPerDay;
-          daysRemaining = daysToDetour + detourToNextDays + remainingAfterDays + dwellDays;
-          calcMode = 'estimated';
+          var toDetourKm = dist([lat,lng], detourCoords) * multToDetour;
+          var daysToDetourEst = toDetourKm / kmPerDay;
+          daysRemaining = daysToDetourEst + detourToNextDays + remainingAfterDays + dwellDays;
         }
       } else {
-        // No detour — use the standard calc (already computed correctedRemainingKm)
         daysRemaining = correctedRemainingKm / kmPerDay;
         if(correctedRemainingKm > 8000) daysRemaining += 7;
         else if(correctedRemainingKm > 3000) daysRemaining += 4;
         else if(correctedRemainingKm > 800)  daysRemaining += 2;
         else                                  daysRemaining += 1;
-        calcMode = 'direct';
       }
-      // Uncertainty wider when detour involved or far out
       var uncertainty = correctedRemainingKm > 5000 ? 7 : correctedRemainingKm > 2000 ? 5 : 3;
       if(detourActive) uncertainty += 3;
       // ────────── END DETOUR ──────────
