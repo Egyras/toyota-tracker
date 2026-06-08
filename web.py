@@ -2212,6 +2212,52 @@ TRACKER_PAGE = BASE + """
           fillOpacity:0.05,weight:1.5,dashArray:'5 5'
         }).addTo(map);
       }
+      // If vessel is on a detour (AIS dest is off the planned route), draw it as
+      // an orange dashed line: current pos → detour port → next planned hub.
+      // Visually communicates "ship is doing this extra stop before continuing."
+      if(window.vesselDetourLine){ map.removeLayer(window.vesselDetourLine); window.vesselDetourLine = null; }
+      if(window.vesselDetourMarker){ map.removeLayer(window.vesselDetourMarker); window.vesselDetourMarker = null; }
+      if(dest && typeof resolvePort === 'function' && !isStale){
+        var dCoords = resolvePort(dest);
+        if(dCoords){
+          // Check it's off-route
+          function _d(a,b){
+            var R=6371,dLat=(b[0]-a[0])*Math.PI/180,dLon=(b[1]-a[1])*Math.PI/180;
+            var x=Math.sin(dLat/2)**2+Math.cos(a[0]*Math.PI/180)*Math.cos(b[0]*Math.PI/180)*Math.sin(dLon/2)**2;
+            return 2*R*Math.asin(Math.sqrt(x));
+          }
+          var nearPlanned = false;
+          for(var pi=0; pi<latlngs.length; pi++){
+            if(_d(dCoords, latlngs[pi]) < 150){ nearPlanned = true; break; }
+          }
+          if(!nearPlanned && latlngs.length > 0){
+            // Find next planned hub after current position
+            var nextHubIdx = -1, bestPD = Infinity;
+            for(var i=1;i<latlngs.length;i++){
+              var d = Math.min(_d([lat,lng], latlngs[i-1]), _d([lat,lng], latlngs[i]));
+              if(d < bestPD){ bestPD = d; nextHubIdx = i; }
+            }
+            if(nextHubIdx > 0){
+              var nextHub = latlngs[nextHubIdx];
+              // Draw detour: vessel → dest port → next planned hub
+              window.vesselDetourLine = L.polyline(
+                [[lat,lng], dCoords, nextHub],
+                {color:'#f59e0b', weight:2.5, dashArray:'8 6', opacity:0.85}
+              ).addTo(map);
+              // Mark the detour port
+              var detourIcon = L.divIcon({
+                className:'',
+                html:'<div style="width:14px;height:14px;border-radius:50%;background:#f59e0b;'+
+                     'border:2px solid #fff;box-shadow:0 0 8px rgba(245,158,11,0.6);"></div>',
+                iconSize:[14,14], iconAnchor:[7,7]
+              });
+              window.vesselDetourMarker = L.marker(dCoords, {icon: detourIcon})
+                .addTo(map)
+                .bindPopup('<b>Detour stop</b><br>'+dest+'<br><small style="color:#aaa">Vessel\\'s next AIS destination</small>');
+            }
+          }
+        }
+      }
       // Show vessel info card
       var card = document.getElementById('vessel-info');
       var skeleton = document.getElementById('vessel-skeleton');
@@ -2245,13 +2291,76 @@ TRACKER_PAGE = BASE + """
         // Voyage progress line
         renderVoyageProgress(lat, lng, dest, eta);
         // ETA estimate banner
-        renderEtaBanner(lat, lng, eta, speed);
+        renderEtaBanner(lat, lng, eta, speed, dest);
         card.style.display='block';
       }
     }
 
-    // ETA: given current vessel position and route, estimate arrival at final dealer
-    function renderEtaBanner(lat, lng, eta, speed){
+    // Port coordinates database for major Toyota PCC ports + bunkering stops.
+    // Used to resolve AIS DESTINATION text → lat/lng so we can detect detours.
+    var PORT_COORDS = {
+      // Major Toyota European destination ports
+      'DERINCE':      [40.760,  29.834],  // Turkey, Sea of Marmara
+      'SAGUNTO':      [39.640,  -0.218],  // Spain (Mediterranean)
+      'LIVORNO':      [43.548,  10.305],  // Italy
+      'PIRAEUS':      [37.940,  23.640],  // Greece
+      'LIMASSOL':     [34.670,  33.040],  // Cyprus
+      'ISKENDERUN':   [36.595,  36.175],  // Turkey (SE coast)
+      'LAS PALMAS':   [28.140, -15.420],  // Canary Islands
+      'BEIRUT':       [33.900,  35.500],  // Lebanon
+      // Northern European hub ports
+      'ZEEBRUGGE':    [51.320,   3.215],  // Belgium
+      'BREMERHAVEN':  [53.580,   8.580],  // Germany
+      'SOUTHAMPTON':  [50.900,  -1.420],  // UK
+      'MALMO':        [55.620,  13.000],  // Sweden
+      'MALMÖ':        [55.620,  13.000],
+      'PALDISKI':     [59.350,  24.080],  // Estonia
+      'HAMBURG':      [53.530,   9.950],
+      'ROTTERDAM':    [51.970,   4.150],
+      'DRAMMEN':      [59.745,  10.220],  // Norway
+      // Origin ports
+      'NAGOYA':       [35.183, 136.910],
+      'TOYOTA CITY':  [35.180, 136.910],
+      'YOKOHAMA':     [35.455, 139.650],
+      'KOBE':         [34.680, 135.200],
+      'HITACHI':      [36.490, 140.650],
+      'SHIMIZU':      [35.013, 138.500],
+      'YOKKAICHI':    [34.965, 136.620],
+      // Bunkering / transit
+      'SINGAPORE':    [ 1.270, 103.840],
+      'SUEZ':         [29.970,  32.560],
+      // Common LOCODE / abbreviation prefixes (AIS often uses these)
+      'SG SIN':       [ 1.270, 103.840],
+      'TR DRC':       [40.760,  29.834],  // Derince LOCODE
+      'TR DER':       [40.760,  29.834],
+      'ES SAG':       [39.640,  -0.218],
+      'BE ZEE':       [51.320,   3.215],
+      'DE BRV':       [53.580,   8.580],  // Bremerhaven LOCODE
+      'NL RTM':       [51.970,   4.150],  // Rotterdam LOCODE
+    };
+
+    function resolvePort(destText){
+      if(!destText) return null;
+      var t = destText.toUpperCase().trim();
+      if(PORT_COORDS[t]) return PORT_COORDS[t];
+      // Try substring match (e.g., "SG SIN PEBGA" contains "SG SIN")
+      for(var key in PORT_COORDS){
+        if(key.length > 3 && t.indexOf(key) !== -1) return PORT_COORDS[key];
+      }
+      // Word-level match (e.g., "DERINCE PORT" or "TR DERINCE" contains "DERINCE")
+      var words = t.split(/[\s,\-_]+/);
+      for(var i=0; i<words.length; i++){
+        if(words[i].length > 3 && PORT_COORDS[words[i]]) return PORT_COORDS[words[i]];
+      }
+      return null;
+    }
+
+    // ETA: given current vessel position and route, estimate arrival at final dealer.
+    // Now detour-aware: if vessel's AIS DESTINATION is an off-route port (e.g., Bishu
+    // heading to DERINCE before continuing to Zeebrugge), inserts it as a virtual
+    // waypoint and adds port-dwell time. This handles multi-port PCC voyages where
+    // a ship visits 2-4 European ports before reaching the planned Northern hub.
+    function renderEtaBanner(lat, lng, eta, speed, dest){
       var banner = document.getElementById('eta-banner');
       var valEl = document.getElementById('eta-value');
       var detEl = document.getElementById('eta-detail');
@@ -2265,12 +2374,13 @@ TRACKER_PAGE = BASE + """
       var totalKm=0;
       for(var i=1;i<latlngs.length;i++) totalKm += dist(latlngs[i-1],latlngs[i]);
       // Find closest segment to vessel
-      var bestProgress=0, bestD=Infinity, cumKm=0;
+      var bestProgress=0, bestD=Infinity, cumKm=0, bestSegEndIdx=-1;
       for(var i=1;i<latlngs.length;i++){
         var segKm=dist(latlngs[i-1],latlngs[i]);
         var d=Math.min(dist([lat,lng],latlngs[i-1]),dist([lat,lng],latlngs[i]));
         if(d<bestD){
           bestD=d;
+          bestSegEndIdx=i;  // index of segment END = next planned hub
           var dStart=dist([lat,lng],latlngs[i-1]);
           var dEnd=dist([lat,lng],latlngs[i]);
           bestProgress=cumKm+segKm*(dStart/(dStart+dEnd));
@@ -2278,21 +2388,13 @@ TRACKER_PAGE = BASE + """
         cumKm+=segKm;
       }
       var remainingKm=totalKm-bestProgress;
-      // OCEAN ROUTING CORRECTION:
-      // Route waypoints are Toyota delivery stops (origin + final destination, sometimes 2-3 hubs).
-      // Straight-line great-circle between them is 2–2.5× shorter than the actual sea route.
-      // Example: Nagoya → Zeebrugge great-circle = ~9,400 km, actual via Suez = ~21,000 km.
-      // Apply a per-segment correction factor based on segment length:
-      //   >2500 km segments = major ocean crossings: actual route ~2.1× great-circle
-      //   800–2500 km = regional ocean hops: ~1.55×
-      //   <800 km = near-destination / coastal: ~1.1×
+      // OCEAN ROUTING CORRECTION (per-segment, applied to remaining only):
       var correctedRemainingKm = 0;
       cumKm = 0;
       for(var i=1;i<latlngs.length;i++){
         var segKm = dist(latlngs[i-1],latlngs[i]);
         var segStart = cumKm;
         var segEnd = cumKm + segKm;
-        // How much of this segment is still remaining?
         var overlapStart = Math.max(segStart, bestProgress);
         var overlapEnd = segEnd;
         if(overlapEnd > overlapStart){
@@ -2302,19 +2404,97 @@ TRACKER_PAGE = BASE + """
         }
         cumKm += segKm;
       }
-      if(correctedRemainingKm < 1) correctedRemainingKm = remainingKm; // fallback
-      // Speed: use actual vessel speed if available, else 550 km/day
-      // PCC typical: 15–17 kn = 28–31 km/h; at 85% efficiency (routing, currents, slow approach) → multiply by ~0.85
+      if(correctedRemainingKm < 1) correctedRemainingKm = remainingKm;
+
+      // ───────── DETOUR DETECTION ─────────
+      // If the vessel's AIS DESTINATION is a known port NOT close to any planned hub,
+      // the vessel is making an off-route stop. We use TWO sources to estimate:
+      //  1. MST's published ETA to that stop (if available — usually accurate)
+      //  2. Heuristic for "detour-to-next-planned-hub" sail time (great-circle × 2.5)
+      // This is much more accurate than re-estimating sail time, especially for
+      // long Mediterranean-to-Northern Europe voyages.
+      var detourPort = null;
+      var detourCoords = null;
+      var detourActive = false;
+      if(dest && bestSegEndIdx > 0){
+        detourCoords = resolvePort(dest);
+        if(detourCoords){
+          var matchesPlannedHub = false;
+          for(var pi=0; pi<latlngs.length; pi++){
+            if(dist(detourCoords, latlngs[pi]) < 150){ matchesPlannedHub = true; break; }
+          }
+          if(!matchesPlannedHub){
+            var nextHub = latlngs[bestSegEndIdx];
+            var directKm = dist([lat,lng], nextHub);
+            var detourKm = dist([lat,lng], detourCoords) + dist(detourCoords, nextHub);
+            var extra = detourKm - directKm;
+            // Only treat as a real detour if it adds >500 km of travel
+            // (filters out roughly-on-the-way bunkering stops like Singapore)
+            if(extra > 500){
+              detourPort = dest;
+              detourActive = true;
+            }
+          }
+        }
+      }
+
+      // Compute daysRemaining
       var kmPerDay = (speed && speed > 5) ? Math.round(speed * 1.852 * 24 * 0.85) : 550;
-      kmPerDay = Math.max(350, Math.min(780, kmPerDay)); // sanity clamp
-      var daysRemaining = correctedRemainingKm / kmPerDay;
-      // Port dwell buffer: 1-2 days per major hub + final truck leg
-      if(correctedRemainingKm > 8000) daysRemaining += 7;      // deep ocean, multiple hubs ahead
-      else if(correctedRemainingKm > 3000) daysRemaining += 4; // one hub remaining
-      else if(correctedRemainingKm > 800)  daysRemaining += 2; // final port → depot → dealer
-      else                                  daysRemaining += 1; // just truck leg
-      // Uncertainty: ocean routes have higher variance; widen for far-out arrivals
+      kmPerDay = Math.max(350, Math.min(780, kmPerDay));
+      var daysRemaining;
+      var calcMode = '';
+      var detourEtaAnchor = null;
+
+      if(detourActive){
+        // Try to use MST's ETA to the detour stop as a strong anchor
+        if(eta){
+          var anchorDate = new Date(eta.replace(' UTC','Z').replace(/^(\d{4}-\d{2}-\d{2}) /,'$1T'));
+          if(!isNaN(anchorDate.getTime()) && anchorDate > Date.now()){
+            detourEtaAnchor = anchorDate;
+          }
+        }
+        var nextHubD = latlngs[bestSegEndIdx];
+        // Detour → next planned hub: use 2.5× great-circle (realistic for Med→N.Europe sea routes
+        // that have to navigate confined seas, Gibraltar, Channel, etc.)
+        var detourToNextKm = dist(detourCoords, nextHubD) * 2.5;
+        var detourToNextDays = detourToNextKm / kmPerDay;
+        // Remaining planned route AFTER reaching the next hub
+        var remainingAfterNext = 0;
+        for(var i=bestSegEndIdx; i<latlngs.length-1; i++){
+          var sk = dist(latlngs[i], latlngs[i+1]);
+          var m = sk > 2500 ? 2.1 : sk > 800 ? 1.55 : 1.1;
+          remainingAfterNext += sk * m;
+        }
+        var remainingAfterDays = remainingAfterNext / kmPerDay;
+        // Dwell budget: 2.5d at detour + 3.5d per planned hub (feeder waits + customs) + 0.5d truck
+        var plannedHubsAhead = latlngs.length - bestSegEndIdx - 1;  // exclude final dealer
+        var dwellDays = 2.5 + plannedHubsAhead * 3.5 + 0.5;
+        if(detourEtaAnchor){
+          // Anchor on MST ETA
+          var daysToDetour = (detourEtaAnchor - Date.now()) / 86400000;
+          daysRemaining = daysToDetour + detourToNextDays + remainingAfterDays + dwellDays;
+          calcMode = 'anchored';
+        } else {
+          // No MST ETA — estimate sail time to detour from current position
+          var toDetourKm = dist([lat,lng], detourCoords) * 2.1;
+          var daysToDetour = toDetourKm / kmPerDay;
+          daysRemaining = daysToDetour + detourToNextDays + remainingAfterDays + dwellDays;
+          calcMode = 'estimated';
+        }
+      } else {
+        // No detour — use the standard calc (already computed correctedRemainingKm)
+        daysRemaining = correctedRemainingKm / kmPerDay;
+        if(correctedRemainingKm > 8000) daysRemaining += 7;
+        else if(correctedRemainingKm > 3000) daysRemaining += 4;
+        else if(correctedRemainingKm > 800)  daysRemaining += 2;
+        else                                  daysRemaining += 1;
+        calcMode = 'direct';
+      }
+      // Uncertainty wider when detour involved or far out
       var uncertainty = correctedRemainingKm > 5000 ? 7 : correctedRemainingKm > 2000 ? 5 : 3;
+      if(detourActive) uncertainty += 3;
+      // ────────── END DETOUR ──────────
+
       var arriveMs = Date.now() + daysRemaining*86400000;
       var arrive = new Date(arriveMs);
       var earlyArrive = new Date(arriveMs - uncertainty*86400000);
@@ -2325,15 +2505,16 @@ TRACKER_PAGE = BASE + """
       // Show next-stop ETA anchor if we have AIS ETA
       var nextStopNote = '';
       if(eta){
-        var etaDate = new Date(eta.replace(' UTC','Z').replace(/^(\d{4}-\d{2}-\d{2}) /,'$1T'));
-        if(!isNaN(etaDate.getTime()) && etaDate > Date.now()){
-          var msLeft = etaDate - Date.now();
+        var etaDateN = new Date(eta.replace(' UTC','Z').replace(/^(\d{4}-\d{2}-\d{2}) /,'$1T'));
+        if(!isNaN(etaDateN.getTime()) && etaDateN > Date.now()){
+          var msLeft = etaDateN - Date.now();
           var dLeft = Math.floor(msLeft/86400000);
           var hLeft = Math.floor((msLeft%86400000)/3600000);
           nextStopNote = ' · Next stop in '+(dLeft>0?dLeft+'d ':'')+hLeft+'h';
         }
       }
-      detEl.textContent = 'Most likely '+fullYear+' · ~'+Math.round(daysRemaining)+' days'+nextStopNote;
+      var detourNote = detourActive ? ' · via '+detourPort : '';
+      detEl.textContent = 'Most likely '+fullYear+' · ~'+Math.round(daysRemaining)+' days'+detourNote+nextStopNote;
       banner.style.display='flex';
     }
 
@@ -3089,17 +3270,11 @@ def api_vessel_detect(order_hash):
                 SELECT CAST((julianday('now') - julianday(vessel_updated)) * 24 AS INTEGER)
                 FROM checks WHERE order_hash=? AND vessel_mmsi=? LIMIT 1
             """, (order_hash, mmsi)).fetchone()
-            # Position freshness check at minute granularity (24*60 = 1440 min/day)
-            pos_age_min = db.execute("""
-                SELECT CAST((julianday('now') - julianday(vessel_updated)) * 1440 AS INTEGER)
-                FROM checks WHERE order_hash=? AND vessel_mmsi=? LIMIT 1
-            """, (order_hash, mmsi)).fetchone()
-            # Berth-verified vessels: never re-detect, only refresh position
-            # Unverified vessels: re-detect identity after 6h (may have been wrong)
-            # Position is now cheap to refresh (shipinfo HTTP fast-path, ~1s), so we
-            # refresh aggressively: stale after 30 minutes instead of 6 hours.
+            # Berth-verified vessels: never re-detect, only refresh position every 6h
+            # Unverified vessels: re-detect after 6h (detection may have been wrong)
+            # NULL age (no timestamp yet) = treat as stale so it refreshes.
             stale_identity = (not berth_verified) and (age is None or age[0] is None or age[0] > 6)
-            stale_position = (pos_age_min is None or pos_age_min[0] is None or pos_age_min[0] > 30)
+            stale_position = (pos_age is None or pos_age[0] is None or pos_age[0] > 6)
 
             if not stale_identity:
                 # Serve from checks position cache if position is fresh
@@ -3110,23 +3285,18 @@ def api_vessel_detect(order_hash):
                     LIMIT 1
                 """, (order_hash, mmsi)).fetchone()
                 if cached and cached["vessel_lat"] and not stale_position:
-                    # If we have fresh position but NULL dest/eta, force a refresh
-                    # to backfill them — likely a leftover from before fast-path fix.
-                    if not cached["vessel_dest"] and not cached["vessel_eta"]:
-                        pass  # fall through to refresh below
-                    else:
-                        return jsonify({
-                            "mmsi":        cached["vessel_mmsi"],
-                            "name":        cached["vessel_name"],
-                            "lat":         float(cached["vessel_lat"]),
-                            "lon":         float(cached["vessel_lon"]),
-                            "speed":       float(cached["vessel_speed"] or 0),
-                            "course":      (float(cached["vessel_course"]) if cached["vessel_course"] not in (None, 0, 0.0) else None),
-                            "destination": cached["vessel_dest"] or "",
-                            "eta":         cached["vessel_eta"] or "",
-                            "cached":      True, "leg": leg_override,
-                            "berth_verified": bool(berth_verified),
-                        })
+                    return jsonify({
+                        "mmsi":        cached["vessel_mmsi"],
+                        "name":        cached["vessel_name"],
+                        "lat":         float(cached["vessel_lat"]),
+                        "lon":         float(cached["vessel_lon"]),
+                        "speed":       float(cached["vessel_speed"] or 0),
+                        "course":      (float(cached["vessel_course"]) if cached["vessel_course"] not in (None, 0, 0.0) else None),
+                        "destination": cached["vessel_dest"] or "",
+                        "eta":         cached["vessel_eta"] or "",
+                        "cached":      True, "leg": leg_override,
+                        "berth_verified": bool(berth_verified),
+                    })
                 # Position stale — refresh position only, keep vessel identity
                 pos = get_vessel_position(mmsi)
                 if pos:
