@@ -3206,19 +3206,18 @@ def index():
                         (order_hash,)
                     ).fetchall()
                     details['_step_observed'] = {r[0]: r[3] for r in obs_rows}
-                    # Get leftTheFactory + buildInProgress rows
                     lf_row  = next((r for r in obs_rows if r[0] == 'leftTheFactory'), None)
                     bip_row = next((r for r in obs_rows if r[0] == 'buildInProgress'), None)
                     lf_observed = lf_row[3] if lf_row else 0
-                    lf_date     = lf_row[1] if lf_row else None
                     # leftTheFactory date is RELIABLE if either:
-                    #  (a) leftTheFactory's own transition out was witnessed (full lifecycle), OR
-                    #  (b) buildInProgress exit was witnessed AND its date_left is STRICTLY
-                    #      BEFORE leftTheFactory.date_entered (real temporal gap, not same-day snapshot)
+                    #  (a) leftTheFactory's own transition out was witnessed, OR
+                    #  (b) buildInProgress was observed (observed=1 means date_entered AND date_left
+                    #      AND they differ — i.e. we witnessed BIP exiting, which IS LF entering).
+                    #      The dates being equal is correct (same login captures both at once);
+                    #      what matters is that BIP had a proper observed lifecycle.
                     if lf_observed == 1:
                         details['_lf_bounded'] = True
-                    elif (bip_row and bip_row[3] == 1 and bip_row[2]
-                          and lf_date and bip_row[2] < lf_date):
+                    elif bip_row and bip_row[3] == 1:
                         details['_lf_bounded'] = True
                     else:
                         details['_lf_bounded'] = False
