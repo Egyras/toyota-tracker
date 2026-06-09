@@ -1920,18 +1920,34 @@ TRACKER_PAGE = BASE + """
 
     <!-- Vessel auto-detection runs automatically, inline controls below for manual override -->
 
-    <!-- Vessel date prompt — shown when login frequency is too low for reliable auto-detection -->
-    <div id="vessel-date-prompt" style="display:none;margin-bottom:1.25rem;padding:10px 14px;
+    <!-- Vessel date prompt — shown when leftTheFactory date is NOT reliable
+         (i.e. no observed buildInProgress→leftTheFactory transition; the date we have
+         is just when the user first logged in and found the order already past factory) -->
+    <div id="vessel-date-prompt" style="display:none;margin-bottom:1.25rem;padding:12px 16px;
          background:rgba(229,0,26,0.06);border:1px solid rgba(229,0,26,0.2);
-         border-radius:8px;font-size:12px;line-height:1.6;">
-      <strong style="color:var(--text);">🚢 Vessel detection needs your help</strong><br>
-      <span style="color:var(--muted);">
-        Your login frequency is too low to reliably detect the vessel automatically —
-        the date we have may be off by several days, leading to the wrong ship.<br>
-        <strong style="color:var(--text);">Enter the exact date from your Toyota notification email</strong>
-        in the <strong style="color:var(--text);">Factory departure</strong> field below and click
-        <strong style="color:var(--red);">🔍 Detect</strong> for accurate results.
-      </span>
+         border-radius:8px;font-size:13px;line-height:1.65;">
+      <div style="font-weight:600;color:var(--text);margin-bottom:6px;">
+        🚢 Carrier unknown — we need the actual factory departure date
+      </div>
+      <div style="color:var(--muted);">
+        When you first opened this tracker, your car had already left the factory.
+        We didn't witness the actual transition, so any auto-detected vessel would be a guess.
+        <br><br>
+        Toyota sent you an email when your car left the factory
+        (subject: <em>"Your vehicle has left the factory"</em> or similar).
+        <strong style="color:var(--text);">Enter the date from that email</strong>
+        in the <strong style="color:var(--text);">Factory departure</strong> field below
+        and click <strong style="color:var(--red);">🔍 Detect</strong>.
+        <br><br>
+        <span style="font-size:11px;opacity:0.85;">
+          📅 <strong>Note:</strong> Port departure data is only available for the last ~20 days.
+          If your car left the factory more than three weeks ago, you may need to enter the
+          MMSI directly — find your ship at
+          <a href="https://www.myshiptracking.com" target="_blank"
+             style="color:#e3b341;">MyShipTracking</a> and paste the number into the
+          <strong>MMSI</strong> field.
+        </span>
+      </div>
     </div>
 
     <!-- MST history limit warning — shown when leftTheFactory date is >25 days ago -->
@@ -2642,10 +2658,24 @@ TRACKER_PAGE = BASE + """
 
         var legOverride = overrides[leg];
         hasUserDate = !!(legOverride && legOverride.depart_date);
-        // hasKnownVessel from DB takes priority over localStorage
-        var dateReliable = hasUserDate || hasKnownVessel || (logins >= 2 && loginGap <= 3);
+        // dateReliable comes from server-side _lf_bounded flag (computed from
+        // step_durations: requires buildInProgress exit observed AND real temporal
+        // gap before leftTheFactory date). Login frequency alone isn't enough —
+        // if first-ever login already caught the order at leftTheFactory, no amount
+        // of subsequent logins makes that date reliable.
+        var lfBounded = {{ 'true' if order._lf_bounded else 'false' }};
+        var dateReliable = hasUserDate || hasKnownVessel || lfBounded;
 
         if(hash){
+          if(!dateReliable){
+            // Date is unreliable — skip auto-detection (would produce a guess), show prompt instead.
+            // Hide skeleton, vessel card stays hidden, user enters date from Toyota email.
+            var skel0 = document.getElementById('vessel-skeleton');
+            if(skel0) skel0.style.display = 'none';
+            var prompt = document.getElementById('vessel-date-prompt');
+            if(prompt) prompt.style.display = 'block';
+            return;  // bail out of the .then chain
+          }
           // Show skeleton while detection runs
           var skel = document.getElementById('vessel-skeleton');
           if(skel) skel.style.display='block';
@@ -2666,11 +2696,6 @@ TRACKER_PAGE = BASE + """
               }
             })
             .catch(()=>{ if(skel) skel.style.display='none'; });
-          // Show prompt if date unreliable and no vessel known
-          if(!dateReliable){
-            var prompt = document.getElementById('vessel-date-prompt');
-            if(prompt) prompt.style.display = 'block';
-          }
         }
       })
       .catch(function(){
@@ -2783,10 +2808,9 @@ STATS_PAGE = BASE + """
 
   <div class="card">
     <div class="section-head">⏱ How long does each step take?</div>
-    <div style="font-size:11px;color:var(--muted);margin-bottom:1rem;line-height:1.55;">
-      Durations are <strong style="color:var(--text);">minimum observed</strong> — measured from the first login that saw a step as current to the first login that saw it completed.
-      Actual durations may be longer because the step likely started before we first noticed it.
-      <span style="display:inline-flex;align-items:center;gap:10px;margin-left:4px;margin-top:4px;">
+    <div style="font-size:11px;color:var(--muted);margin-bottom:1rem;">
+      Only counts orders where we observed both the start and end of a step.
+      <span style="display:inline-flex;align-items:center;gap:10px;margin-left:8px;">
         <span style="display:inline-flex;align-items:center;gap:3px;">
           <span style="background:rgba(63,185,80,0.15);border:1px solid rgba(63,185,80,0.3);
                        border-radius:10px;padding:1px 7px;font-size:10px;color:#3fb950;">✓ Observed</span>
@@ -2796,29 +2820,6 @@ STATS_PAGE = BASE + """
     </div>
 
     {% if order_to_build and order_to_build['samples'] > 0 %}
-    {% set otb_samples = order_to_build['samples'] %}
-    {% if otb_samples >= 5 %}
-      {% set otb_rel_label = '✓ Reliable' %}
-      {% set otb_rel_bg = 'rgba(63,185,80,0.15)' %}
-      {% set otb_rel_border = 'rgba(63,185,80,0.3)' %}
-      {% set otb_rel_color = '#3fb950' %}
-      {% set otb_value = '~' ~ (order_to_build['avg_days']|round(0)|int) ~ ' days avg' %}
-      {% set otb_range = 'min ' ~ order_to_build['min_days'] ~ ' / max ' ~ order_to_build['max_days'] %}
-    {% elif otb_samples >= 2 %}
-      {% set otb_rel_label = '~ Tentative' %}
-      {% set otb_rel_bg = 'rgba(227,179,65,0.15)' %}
-      {% set otb_rel_border = 'rgba(227,179,65,0.3)' %}
-      {% set otb_rel_color = '#e3b341' %}
-      {% set otb_value = order_to_build['min_days'] ~ '–' ~ order_to_build['max_days'] ~ ' days' %}
-      {% set otb_range = '' %}
-    {% else %}
-      {% set otb_rel_label = '◌ Single data point' %}
-      {% set otb_rel_bg = 'rgba(139,148,158,0.12)' %}
-      {% set otb_rel_border = 'rgba(139,148,158,0.3)' %}
-      {% set otb_rel_color = 'var(--muted)' %}
-      {% set otb_value = 'Observed: ' ~ (order_to_build['avg_days']|round(0)|int) ~ ' days' %}
-      {% set otb_range = '' %}
-    {% endif %}
     <div style="background:var(--surface2);border:1px solid var(--border);
                 border-radius:8px;padding:.85rem;margin-bottom:1rem;">
       <div style="font-size:11px;color:var(--muted);text-transform:uppercase;
@@ -2826,17 +2827,27 @@ STATS_PAGE = BASE + """
         📦 Order placed → Production started
       </div>
       <div style="font-size:20px;font-weight:600;color:var(--text);">
-        {{ otb_value }}
+        ~{{ order_to_build['avg_days'] }} days
         <span style="font-size:12px;color:var(--muted);font-weight:400;">
-          {% if otb_range %}&nbsp;{{ otb_range }} ·{% endif %}
-          {{ otb_samples }} {% if otb_samples == 1 %}order{% else %}orders{% endif %}
+          &nbsp;min {{ order_to_build['min_days'] }} / max {{ order_to_build['max_days'] }}
+          · {{ order_to_build['samples'] }} orders
         </span>
-        <span style="background:{{ otb_rel_bg }};border:1px solid {{ otb_rel_border }};
-                     border-radius:10px;padding:2px 8px;font-size:10px;color:{{ otb_rel_color }};
-                     font-weight:500;vertical-align:middle;">{{ otb_rel_label }}</span>
+        {% if order_to_build['samples'] >= 5 %}
+        <span style="background:rgba(63,185,80,0.15);border:1px solid rgba(63,185,80,0.3);
+                     border-radius:10px;padding:2px 8px;font-size:10px;color:#3fb950;
+                     font-weight:500;vertical-align:middle;">✓ Reliable</span>
+        {% elif order_to_build['samples'] >= 2 %}
+        <span style="background:rgba(227,179,65,0.15);border:1px solid rgba(227,179,65,0.3);
+                     border-radius:10px;padding:2px 8px;font-size:10px;color:#e3b341;
+                     font-weight:500;vertical-align:middle;">~ Early data</span>
+        {% else %}
+        <span style="background:rgba(229,0,26,0.08);border:1px solid rgba(229,0,26,0.25);
+                     border-radius:10px;padding:2px 8px;font-size:10px;color:var(--red);
+                     font-weight:500;vertical-align:middle;">⚠ 1 sample</span>
+        {% endif %}
       </div>
       <div style="font-size:10px;color:var(--muted);margin-top:6px;">
-        Order date from Toyota API (accurate) · Build start date from first login that saw buildInProgress — actual time may be slightly shorter
+        Order date from Toyota API (accurate) · Build start date depends on login frequency
       </div>
     </div>
     {% endif %}
@@ -2852,24 +2863,18 @@ STATS_PAGE = BASE + """
         {% set rel_bg = 'rgba(63,185,80,0.15)' %}
         {% set rel_border = 'rgba(63,185,80,0.3)' %}
         {% set rel_color = '#3fb950' %}
-        {% set value_label = '~' ~ r['avg_days'] ~ ' days avg' %}
-        {% set bar_opacity = '1' %}
       {% elif samples >= 2 %}
-        {% set rel_label = '~ Tentative' %}
+        {% set rel_label = '~ Early data' %}
         {% set rel_bg = 'rgba(227,179,65,0.15)' %}
         {% set rel_border = 'rgba(227,179,65,0.3)' %}
         {% set rel_color = '#e3b341' %}
-        {% set value_label = r['min_days'] ~ '–' ~ r['max_days'] ~ ' days' %}
-        {% set bar_opacity = '0.75' %}
       {% else %}
-        {% set rel_label = '◌ Single data point' %}
-        {% set rel_bg = 'rgba(139,148,158,0.12)' %}
-        {% set rel_border = 'rgba(139,148,158,0.3)' %}
-        {% set rel_color = 'var(--muted)' %}
-        {% set value_label = 'Observed: ' ~ (r['avg_days']|round(0)|int) ~ ' days' %}
-        {% set bar_opacity = '0.4' %}
+        {% set rel_label = '⚠ 1 sample' %}
+        {% set rel_bg = 'rgba(229,0,26,0.08)' %}
+        {% set rel_border = 'rgba(229,0,26,0.25)' %}
+        {% set rel_color = 'var(--red)' %}
       {% endif %}
-      <div class="bar-row" style="opacity:{{ bar_opacity }};">
+      <div class="bar-row">
         <div class="bar-head">
           <div style="display:flex;align-items:center;gap:8px;">
             <span>{{ r['step'] }}</span>
@@ -2882,9 +2887,9 @@ STATS_PAGE = BASE + """
                          border-radius:10px;padding:1px 7px;font-size:10px;
                          color:{{ rel_color }};font-weight:500;white-space:nowrap;">{{ rel_label }}</span>
           </div>
-          <span style="font-weight:500;">{{ value_label }}
-            <span style="color:var(--muted);font-weight:400;font-size:11px;margin-left:6px;">
-              · {{ r['samples'] }} {% if r['samples'] == 1 %}order{% else %}orders{% endif %}
+          <span>~{{ r['avg_days'] }} days
+            <span style="color:var(--muted);font-weight:400;font-size:11px;">
+              min {{ r['min_days'] }} / max {{ r['max_days'] }} · {{ r['samples'] }} orders
             </span>
           </span>
         </div>
@@ -2930,13 +2935,12 @@ STATS_PAGE = BASE + """
     </div>
     {% endif %}
 
-    <div style="margin-top:1rem;padding:10px 12px;background:rgba(139,148,158,0.08);
-                border-radius:6px;font-size:11px;color:var(--muted);line-height:1.7;">
-      📊 <strong style="color:var(--text);">Reading the data:</strong>
-      <span style="color:var(--muted);">◌ Single data point</span> = one observed transition, shown as anecdotal evidence ·
-      <span style="color:#e3b341;">~ Tentative</span> = 2-4 orders, shown as range only ·
-      <span style="color:#3fb950;">✓ Reliable</span> = 5+ orders, shown as average.
-      Statistics improve as more users log in frequently.
+    <div style="margin-top:1rem;padding:8px 12px;background:rgba(139,148,158,0.08);
+                border-radius:6px;font-size:11px;color:var(--muted);line-height:1.6;">
+      📊 Statistics improve as more users log in frequently.
+      Reliability increases with sample count:
+      <span style="color:#e3b341;">~ Early data</span> = 2-4 orders ·
+      <span style="color:#3fb950;">✓ Reliable</span> = 5+ orders
     </div>
   </div>
 
@@ -2949,36 +2953,13 @@ STATS_PAGE = BASE + """
     <table class="data-table">
       <tr>
         <th>Leg</th>
-        <th>Duration</th>
-        <th>Range</th>
+        <th>Avg days</th>
+        <th>Min / Max</th>
         <th>Orders</th>
       </tr>
       {% for r in hub_leg_stats %}
       {% if r['avg_days'] %}
-      {% set leg_samples = r['samples'] %}
-      {% if leg_samples >= 5 %}
-        {% set leg_rel_label = '✓ Reliable' %}
-        {% set leg_rel_bg = 'rgba(63,185,80,0.15)' %}
-        {% set leg_rel_border = 'rgba(63,185,80,0.3)' %}
-        {% set leg_rel_color = '#3fb950' %}
-        {% set leg_value = '~' ~ r['avg_days'] ~ ' days avg' %}
-        {% set leg_row_opacity = '1' %}
-      {% elif leg_samples >= 2 %}
-        {% set leg_rel_label = '~ Tentative' %}
-        {% set leg_rel_bg = 'rgba(227,179,65,0.15)' %}
-        {% set leg_rel_border = 'rgba(227,179,65,0.3)' %}
-        {% set leg_rel_color = '#e3b341' %}
-        {% set leg_value = r['min_days'] ~ '–' ~ r['max_days'] ~ ' days' %}
-        {% set leg_row_opacity = '0.85' %}
-      {% else %}
-        {% set leg_rel_label = '◌ Single data point' %}
-        {% set leg_rel_bg = 'rgba(139,148,158,0.12)' %}
-        {% set leg_rel_border = 'rgba(139,148,158,0.3)' %}
-        {% set leg_rel_color = 'var(--muted)' %}
-        {% set leg_value = 'Observed: ' ~ (r['avg_days']|round(0)|int) ~ ' days' %}
-        {% set leg_row_opacity = '0.6' %}
-      {% endif %}
-      <tr style="opacity:{{ leg_row_opacity }};">
+      <tr>
         <td>
           <span style="font-weight:500;">{{ r['from_hub'] }}</span>
           <span style="color:var(--muted);margin:0 4px;">→</span>
@@ -2989,15 +2970,23 @@ STATS_PAGE = BASE + """
             {% else %}🚛 feeder{% endif %}
           </span>
         </td>
-        <td style="font-weight:500;color:var(--text);">{{ leg_value }}</td>
-        <td style="color:var(--muted);font-size:12px;">
-          {% if leg_samples >= 2 %}{{ r['min_days'] }} – {{ r['max_days'] }}{% else %}—{% endif %}
-        </td>
+        <td style="font-weight:600;color:var(--text);">~{{ r['avg_days'] }} days</td>
+        <td style="color:var(--muted);font-size:12px;">{{ r['min_days'] }} / {{ r['max_days'] }}</td>
         <td>
           <span style="font-size:11px;color:var(--muted);">{{ r['samples'] }}</span>
-          <span style="background:{{ leg_rel_bg }};border:1px solid {{ leg_rel_border }};
-                       border-radius:10px;padding:1px 6px;font-size:9px;color:{{ leg_rel_color }};
-                       font-weight:500;margin-left:4px;white-space:nowrap;">{{ leg_rel_label }}</span>
+          {% if r['observed_count'] >= 5 %}
+          <span style="background:rgba(63,185,80,0.15);border:1px solid rgba(63,185,80,0.3);
+                       border-radius:10px;padding:1px 6px;font-size:9px;color:#3fb950;
+                       font-weight:500;margin-left:4px;">✓ Reliable</span>
+          {% elif r['observed_count'] >= 2 %}
+          <span style="background:rgba(227,179,65,0.15);border:1px solid rgba(227,179,65,0.3);
+                       border-radius:10px;padding:1px 6px;font-size:9px;color:#e3b341;
+                       font-weight:500;margin-left:4px;">~ Early data</span>
+          {% else %}
+          <span style="background:rgba(229,0,26,0.08);border:1px solid rgba(229,0,26,0.25);
+                       border-radius:10px;padding:1px 6px;font-size:9px;color:var(--red);
+                       font-weight:500;margin-left:4px;">⚠ 1 sample</span>
+          {% endif %}
         </td>
       </tr>
       {% endif %}
@@ -3213,23 +3202,26 @@ def index():
                 # (no prior step with observed=1 to constrain the transition window).
                 if order_hash:
                     obs_rows = get_db().execute(
-                        "SELECT step, date_entered, observed FROM step_durations WHERE order_hash=?",
+                        "SELECT step, date_entered, date_left, observed FROM step_durations WHERE order_hash=?",
                         (order_hash,)
                     ).fetchall()
-                    details['_step_observed'] = {r[0]: r[1] for r in obs_rows}  # step -> observed flag
-                    # Get leftTheFactory observed flag and date
-                    lf_row = next((r for r in obs_rows if r[0] == 'leftTheFactory'), None)
-                    lf_observed_flag = lf_row[2] if lf_row else -1
-                    lf_date = lf_row[1] if lf_row else None
-                    # Bounded = there's at least one observed=1 step with date <= lf_date
-                    if lf_observed_flag == 1:
-                        details['_lf_bounded'] = True  # witnessed directly
-                    elif lf_date:
-                        bounded = any(r[2] == 1 and r[1] and r[1] <= lf_date for r in obs_rows)
-                        details['_lf_bounded'] = bounded
+                    details['_step_observed'] = {r[0]: r[3] for r in obs_rows}
+                    # Get leftTheFactory + buildInProgress rows
+                    lf_row  = next((r for r in obs_rows if r[0] == 'leftTheFactory'), None)
+                    bip_row = next((r for r in obs_rows if r[0] == 'buildInProgress'), None)
+                    lf_observed = lf_row[3] if lf_row else 0
+                    lf_date     = lf_row[1] if lf_row else None
+                    # leftTheFactory date is RELIABLE if either:
+                    #  (a) leftTheFactory's own transition out was witnessed (full lifecycle), OR
+                    #  (b) buildInProgress exit was witnessed AND its date_left is STRICTLY
+                    #      BEFORE leftTheFactory.date_entered (real temporal gap, not same-day snapshot)
+                    if lf_observed == 1:
+                        details['_lf_bounded'] = True
+                    elif (bip_row and bip_row[3] == 1 and bip_row[2]
+                          and lf_date and bip_row[2] < lf_date):
+                        details['_lf_bounded'] = True
                     else:
                         details['_lf_bounded'] = False
-                    details['_step_observed'] = {r[0]: r[2] for r in obs_rows}  # step -> observed (int)
                 else:
                     details['_step_observed'] = {}
                     details['_lf_bounded'] = False
