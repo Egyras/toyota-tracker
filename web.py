@@ -2491,14 +2491,11 @@ TRACKER_PAGE = BASE + """
         var multDetourToNext = routeMultiplier(detourCoords, nextHubD);
         var detourToNextKm = dist(detourCoords, nextHubD) * multDetourToNext;
         var detourToNextDays = detourToNextKm / kmPerDay;
-        // Remaining planned route AFTER reaching the next hub.
-        // Use route-aware multipliers (same as detour leg) so intra-northern
-        // feeders (Zee→Mal, Mal→Pal at ~800km each) aren't over-corrected
-        // with the size-based 1.55x — they're coastal feeders, ~1.15x is correct.
+        // Remaining planned route AFTER reaching the next hub
         var remainingAfterNext = 0;
         for(var i=bestSegEndIdx; i<latlngs.length-1; i++){
           var sk = dist(latlngs[i], latlngs[i+1]);
-          var m = routeMultiplier(latlngs[i], latlngs[i+1]);
+          var m = sk > 2500 ? 2.1 : sk > 800 ? 1.55 : 1.1;
           remainingAfterNext += sk * m;
         }
         var remainingAfterDays = remainingAfterNext / kmPerDay;
@@ -2524,22 +2521,8 @@ TRACKER_PAGE = BASE + """
         else if(correctedRemainingKm > 800)  daysRemaining += 2;
         else                                  daysRemaining += 1;
       }
-      // Uncertainty window — calibrated from real variance sources:
-      //  • MST ETA precision: ±1d (K-Line publishes tight schedules)
-      //  • Each port dwell: ±1-2d (feeders run 2-3×/week, wait varies)
-      //  • Each ocean leg transit: ±1-2d (Suez/Gibraltar queues, weather)
-      // Combined standard deviation for full Asia→Northern voyage with 3 hubs:
-      // √(1² + 1² + 2² + 2.5² + 1.5² + 1²) ≈ 4d realistic 1-sigma.
-      // We display ±1.5σ ≈ ±6d to cover ~90% of cases.
-      // Scales DOWN as we get closer (less compounding variance ahead).
-      var uncertainty;
-      if(daysRemaining > 40)      uncertainty = 6;
-      else if(daysRemaining > 20) uncertainty = 4;
-      else if(daysRemaining > 10) uncertainty = 3;
-      else                         uncertainty = 2;
-      // Detour adds modest variance — multi-port voyages have small extra schedule risk,
-      // but the MST anchor already captures most of the deep-sea uncertainty.
-      if(detourActive) uncertainty += 1;
+      var uncertainty = correctedRemainingKm > 5000 ? 7 : correctedRemainingKm > 2000 ? 5 : 3;
+      if(detourActive) uncertainty += 3;
       // ────────── END DETOUR ──────────
 
       var arriveMs = Date.now() + daysRemaining*86400000;
@@ -2800,9 +2783,10 @@ STATS_PAGE = BASE + """
 
   <div class="card">
     <div class="section-head">⏱ How long does each step take?</div>
-    <div style="font-size:11px;color:var(--muted);margin-bottom:1rem;">
-      Only counts orders where we observed both the start and end of a step.
-      <span style="display:inline-flex;align-items:center;gap:10px;margin-left:8px;">
+    <div style="font-size:11px;color:var(--muted);margin-bottom:1rem;line-height:1.55;">
+      Durations are <strong style="color:var(--text);">minimum observed</strong> — measured from the first login that saw a step as current to the first login that saw it completed.
+      Actual durations may be longer because the step likely started before we first noticed it.
+      <span style="display:inline-flex;align-items:center;gap:10px;margin-left:4px;margin-top:4px;">
         <span style="display:inline-flex;align-items:center;gap:3px;">
           <span style="background:rgba(63,185,80,0.15);border:1px solid rgba(63,185,80,0.3);
                        border-radius:10px;padding:1px 7px;font-size:10px;color:#3fb950;">✓ Observed</span>
@@ -2812,6 +2796,29 @@ STATS_PAGE = BASE + """
     </div>
 
     {% if order_to_build and order_to_build['samples'] > 0 %}
+    {% set otb_samples = order_to_build['samples'] %}
+    {% if otb_samples >= 5 %}
+      {% set otb_rel_label = '✓ Reliable' %}
+      {% set otb_rel_bg = 'rgba(63,185,80,0.15)' %}
+      {% set otb_rel_border = 'rgba(63,185,80,0.3)' %}
+      {% set otb_rel_color = '#3fb950' %}
+      {% set otb_value = '~' ~ (order_to_build['avg_days']|round(0)|int) ~ ' days avg' %}
+      {% set otb_range = 'min ' ~ order_to_build['min_days'] ~ ' / max ' ~ order_to_build['max_days'] %}
+    {% elif otb_samples >= 2 %}
+      {% set otb_rel_label = '~ Tentative' %}
+      {% set otb_rel_bg = 'rgba(227,179,65,0.15)' %}
+      {% set otb_rel_border = 'rgba(227,179,65,0.3)' %}
+      {% set otb_rel_color = '#e3b341' %}
+      {% set otb_value = order_to_build['min_days'] ~ '–' ~ order_to_build['max_days'] ~ ' days' %}
+      {% set otb_range = '' %}
+    {% else %}
+      {% set otb_rel_label = '◌ Single data point' %}
+      {% set otb_rel_bg = 'rgba(139,148,158,0.12)' %}
+      {% set otb_rel_border = 'rgba(139,148,158,0.3)' %}
+      {% set otb_rel_color = 'var(--muted)' %}
+      {% set otb_value = 'Observed: ' ~ (order_to_build['avg_days']|round(0)|int) ~ ' days' %}
+      {% set otb_range = '' %}
+    {% endif %}
     <div style="background:var(--surface2);border:1px solid var(--border);
                 border-radius:8px;padding:.85rem;margin-bottom:1rem;">
       <div style="font-size:11px;color:var(--muted);text-transform:uppercase;
@@ -2819,27 +2826,17 @@ STATS_PAGE = BASE + """
         📦 Order placed → Production started
       </div>
       <div style="font-size:20px;font-weight:600;color:var(--text);">
-        ~{{ order_to_build['avg_days'] }} days
+        {{ otb_value }}
         <span style="font-size:12px;color:var(--muted);font-weight:400;">
-          &nbsp;min {{ order_to_build['min_days'] }} / max {{ order_to_build['max_days'] }}
-          · {{ order_to_build['samples'] }} orders
+          {% if otb_range %}&nbsp;{{ otb_range }} ·{% endif %}
+          {{ otb_samples }} {% if otb_samples == 1 %}order{% else %}orders{% endif %}
         </span>
-        {% if order_to_build['samples'] >= 5 %}
-        <span style="background:rgba(63,185,80,0.15);border:1px solid rgba(63,185,80,0.3);
-                     border-radius:10px;padding:2px 8px;font-size:10px;color:#3fb950;
-                     font-weight:500;vertical-align:middle;">✓ Reliable</span>
-        {% elif order_to_build['samples'] >= 2 %}
-        <span style="background:rgba(227,179,65,0.15);border:1px solid rgba(227,179,65,0.3);
-                     border-radius:10px;padding:2px 8px;font-size:10px;color:#e3b341;
-                     font-weight:500;vertical-align:middle;">~ Early data</span>
-        {% else %}
-        <span style="background:rgba(229,0,26,0.08);border:1px solid rgba(229,0,26,0.25);
-                     border-radius:10px;padding:2px 8px;font-size:10px;color:var(--red);
-                     font-weight:500;vertical-align:middle;">⚠ 1 sample</span>
-        {% endif %}
+        <span style="background:{{ otb_rel_bg }};border:1px solid {{ otb_rel_border }};
+                     border-radius:10px;padding:2px 8px;font-size:10px;color:{{ otb_rel_color }};
+                     font-weight:500;vertical-align:middle;">{{ otb_rel_label }}</span>
       </div>
       <div style="font-size:10px;color:var(--muted);margin-top:6px;">
-        Order date from Toyota API (accurate) · Build start date depends on login frequency
+        Order date from Toyota API (accurate) · Build start date from first login that saw buildInProgress — actual time may be slightly shorter
       </div>
     </div>
     {% endif %}
@@ -2855,18 +2852,24 @@ STATS_PAGE = BASE + """
         {% set rel_bg = 'rgba(63,185,80,0.15)' %}
         {% set rel_border = 'rgba(63,185,80,0.3)' %}
         {% set rel_color = '#3fb950' %}
+        {% set value_label = '~' ~ r['avg_days'] ~ ' days avg' %}
+        {% set bar_opacity = '1' %}
       {% elif samples >= 2 %}
-        {% set rel_label = '~ Early data' %}
+        {% set rel_label = '~ Tentative' %}
         {% set rel_bg = 'rgba(227,179,65,0.15)' %}
         {% set rel_border = 'rgba(227,179,65,0.3)' %}
         {% set rel_color = '#e3b341' %}
+        {% set value_label = r['min_days'] ~ '–' ~ r['max_days'] ~ ' days' %}
+        {% set bar_opacity = '0.75' %}
       {% else %}
-        {% set rel_label = '⚠ 1 sample' %}
-        {% set rel_bg = 'rgba(229,0,26,0.08)' %}
-        {% set rel_border = 'rgba(229,0,26,0.25)' %}
-        {% set rel_color = 'var(--red)' %}
+        {% set rel_label = '◌ Single data point' %}
+        {% set rel_bg = 'rgba(139,148,158,0.12)' %}
+        {% set rel_border = 'rgba(139,148,158,0.3)' %}
+        {% set rel_color = 'var(--muted)' %}
+        {% set value_label = 'Observed: ' ~ (r['avg_days']|round(0)|int) ~ ' days' %}
+        {% set bar_opacity = '0.4' %}
       {% endif %}
-      <div class="bar-row">
+      <div class="bar-row" style="opacity:{{ bar_opacity }};">
         <div class="bar-head">
           <div style="display:flex;align-items:center;gap:8px;">
             <span>{{ r['step'] }}</span>
@@ -2879,9 +2882,9 @@ STATS_PAGE = BASE + """
                          border-radius:10px;padding:1px 7px;font-size:10px;
                          color:{{ rel_color }};font-weight:500;white-space:nowrap;">{{ rel_label }}</span>
           </div>
-          <span>~{{ r['avg_days'] }} days
-            <span style="color:var(--muted);font-weight:400;font-size:11px;">
-              min {{ r['min_days'] }} / max {{ r['max_days'] }} · {{ r['samples'] }} orders
+          <span style="font-weight:500;">{{ value_label }}
+            <span style="color:var(--muted);font-weight:400;font-size:11px;margin-left:6px;">
+              · {{ r['samples'] }} {% if r['samples'] == 1 %}order{% else %}orders{% endif %}
             </span>
           </span>
         </div>
@@ -2927,12 +2930,13 @@ STATS_PAGE = BASE + """
     </div>
     {% endif %}
 
-    <div style="margin-top:1rem;padding:8px 12px;background:rgba(139,148,158,0.08);
-                border-radius:6px;font-size:11px;color:var(--muted);line-height:1.6;">
-      📊 Statistics improve as more users log in frequently.
-      Reliability increases with sample count:
-      <span style="color:#e3b341;">~ Early data</span> = 2-4 orders ·
-      <span style="color:#3fb950;">✓ Reliable</span> = 5+ orders
+    <div style="margin-top:1rem;padding:10px 12px;background:rgba(139,148,158,0.08);
+                border-radius:6px;font-size:11px;color:var(--muted);line-height:1.7;">
+      📊 <strong style="color:var(--text);">Reading the data:</strong>
+      <span style="color:var(--muted);">◌ Single data point</span> = one observed transition, shown as anecdotal evidence ·
+      <span style="color:#e3b341;">~ Tentative</span> = 2-4 orders, shown as range only ·
+      <span style="color:#3fb950;">✓ Reliable</span> = 5+ orders, shown as average.
+      Statistics improve as more users log in frequently.
     </div>
   </div>
 
@@ -2945,13 +2949,36 @@ STATS_PAGE = BASE + """
     <table class="data-table">
       <tr>
         <th>Leg</th>
-        <th>Avg days</th>
-        <th>Min / Max</th>
+        <th>Duration</th>
+        <th>Range</th>
         <th>Orders</th>
       </tr>
       {% for r in hub_leg_stats %}
       {% if r['avg_days'] %}
-      <tr>
+      {% set leg_samples = r['samples'] %}
+      {% if leg_samples >= 5 %}
+        {% set leg_rel_label = '✓ Reliable' %}
+        {% set leg_rel_bg = 'rgba(63,185,80,0.15)' %}
+        {% set leg_rel_border = 'rgba(63,185,80,0.3)' %}
+        {% set leg_rel_color = '#3fb950' %}
+        {% set leg_value = '~' ~ r['avg_days'] ~ ' days avg' %}
+        {% set leg_row_opacity = '1' %}
+      {% elif leg_samples >= 2 %}
+        {% set leg_rel_label = '~ Tentative' %}
+        {% set leg_rel_bg = 'rgba(227,179,65,0.15)' %}
+        {% set leg_rel_border = 'rgba(227,179,65,0.3)' %}
+        {% set leg_rel_color = '#e3b341' %}
+        {% set leg_value = r['min_days'] ~ '–' ~ r['max_days'] ~ ' days' %}
+        {% set leg_row_opacity = '0.85' %}
+      {% else %}
+        {% set leg_rel_label = '◌ Single data point' %}
+        {% set leg_rel_bg = 'rgba(139,148,158,0.12)' %}
+        {% set leg_rel_border = 'rgba(139,148,158,0.3)' %}
+        {% set leg_rel_color = 'var(--muted)' %}
+        {% set leg_value = 'Observed: ' ~ (r['avg_days']|round(0)|int) ~ ' days' %}
+        {% set leg_row_opacity = '0.6' %}
+      {% endif %}
+      <tr style="opacity:{{ leg_row_opacity }};">
         <td>
           <span style="font-weight:500;">{{ r['from_hub'] }}</span>
           <span style="color:var(--muted);margin:0 4px;">→</span>
@@ -2962,23 +2989,15 @@ STATS_PAGE = BASE + """
             {% else %}🚛 feeder{% endif %}
           </span>
         </td>
-        <td style="font-weight:600;color:var(--text);">~{{ r['avg_days'] }} days</td>
-        <td style="color:var(--muted);font-size:12px;">{{ r['min_days'] }} / {{ r['max_days'] }}</td>
+        <td style="font-weight:500;color:var(--text);">{{ leg_value }}</td>
+        <td style="color:var(--muted);font-size:12px;">
+          {% if leg_samples >= 2 %}{{ r['min_days'] }} – {{ r['max_days'] }}{% else %}—{% endif %}
+        </td>
         <td>
           <span style="font-size:11px;color:var(--muted);">{{ r['samples'] }}</span>
-          {% if r['observed_count'] >= 5 %}
-          <span style="background:rgba(63,185,80,0.15);border:1px solid rgba(63,185,80,0.3);
-                       border-radius:10px;padding:1px 6px;font-size:9px;color:#3fb950;
-                       font-weight:500;margin-left:4px;">✓ Reliable</span>
-          {% elif r['observed_count'] >= 2 %}
-          <span style="background:rgba(227,179,65,0.15);border:1px solid rgba(227,179,65,0.3);
-                       border-radius:10px;padding:1px 6px;font-size:9px;color:#e3b341;
-                       font-weight:500;margin-left:4px;">~ Early data</span>
-          {% else %}
-          <span style="background:rgba(229,0,26,0.08);border:1px solid rgba(229,0,26,0.25);
-                       border-radius:10px;padding:1px 6px;font-size:9px;color:var(--red);
-                       font-weight:500;margin-left:4px;">⚠ 1 sample</span>
-          {% endif %}
+          <span style="background:{{ leg_rel_bg }};border:1px solid {{ leg_rel_border }};
+                       border-radius:10px;padding:1px 6px;font-size:9px;color:{{ leg_rel_color }};
+                       font-weight:500;margin-left:4px;white-space:nowrap;">{{ leg_rel_label }}</span>
         </td>
       </tr>
       {% endif %}
