@@ -2524,8 +2524,22 @@ TRACKER_PAGE = BASE + """
         else if(correctedRemainingKm > 800)  daysRemaining += 2;
         else                                  daysRemaining += 1;
       }
-      var uncertainty = correctedRemainingKm > 5000 ? 7 : correctedRemainingKm > 2000 ? 5 : 3;
-      if(detourActive) uncertainty += 3;
+      // Uncertainty window — calibrated from real variance sources:
+      //  • MST ETA precision: ±1d (K-Line publishes tight schedules)
+      //  • Each port dwell: ±1-2d (feeders run 2-3×/week, wait varies)
+      //  • Each ocean leg transit: ±1-2d (Suez/Gibraltar queues, weather)
+      // Combined standard deviation for full Asia→Northern voyage with 3 hubs:
+      // √(1² + 1² + 2² + 2.5² + 1.5² + 1²) ≈ 4d realistic 1-sigma.
+      // We display ±1.5σ ≈ ±6d to cover ~90% of cases.
+      // Scales DOWN as we get closer (less compounding variance ahead).
+      var uncertainty;
+      if(daysRemaining > 40)      uncertainty = 6;
+      else if(daysRemaining > 20) uncertainty = 4;
+      else if(daysRemaining > 10) uncertainty = 3;
+      else                         uncertainty = 2;
+      // Detour adds modest variance — multi-port voyages have small extra schedule risk,
+      // but the MST anchor already captures most of the deep-sea uncertainty.
+      if(detourActive) uncertainty += 1;
       // ────────── END DETOUR ──────────
 
       var arriveMs = Date.now() + daysRemaining*86400000;
