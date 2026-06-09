@@ -327,16 +327,26 @@ async function getMstDetailHttp(mmsi, imo, name){
             }
             if(matches.length > 0) dest = matches[matches.length - 1];
 
-            // ETA: try several patterns MST uses
+            // ETA: anchor on the literal "ETA*" label that MST uses on vessel
+            // detail pages. Case-sensitive (no /i flag) to avoid matching "eta"
+            // inside <meta> tags. The page renders ETA as two <span class="line">
+            // elements: date in first span, time in second (bold).
             var eta = null;
-            var etaPatterns = [
-              /ETA[\s\S]{0,300}?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?:\s*UTC)?)/i,
-              /ETA[\s\S]{0,300}?<span class="line">(\d{4}-\d{2}-\d{2})<\/span>/i,
-              /ETA[\s\S]{0,400}?(\d{4}-\d{2}-\d{2})/i
-            ];
-            for(var pi=0; pi<etaPatterns.length; pi++){
-              var em = body.match(etaPatterns[pi]);
-              if(em){ eta = em[1].trim(); break; }
+            var etaIdx = body.indexOf("ETA*");
+            if(etaIdx >= 0){
+              var eseg = body.slice(etaIdx, etaIdx + 400);
+              var ed1 = eseg.match(/<span class="line">(\d{4}-\d{2}-\d{2})<\/span>\s*<span class="line"><b>([^<]+)<\/b>/);
+              if(ed1){
+                eta = ed1[1] + " " + ed1[2].trim();
+              } else {
+                var ed2 = eseg.match(/<span class="line">(\d{4}-\d{2}-\d{2})<\/span>/);
+                if(ed2) eta = ed2[1];
+                else {
+                  // last-resort: any date pattern within 400 chars after ETA*
+                  var ed3 = eseg.match(/(\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2})?)/);
+                  if(ed3) eta = ed3[1];
+                }
+              }
             }
 
             if(dest || eta){
