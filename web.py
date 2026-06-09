@@ -2491,11 +2491,14 @@ TRACKER_PAGE = BASE + """
         var multDetourToNext = routeMultiplier(detourCoords, nextHubD);
         var detourToNextKm = dist(detourCoords, nextHubD) * multDetourToNext;
         var detourToNextDays = detourToNextKm / kmPerDay;
-        // Remaining planned route AFTER reaching the next hub
+        // Remaining planned route AFTER reaching the next hub.
+        // Use route-aware multipliers (same as detour leg) so intra-northern
+        // feeders (Zee→Mal, Mal→Pal at ~800km each) aren't over-corrected
+        // with the size-based 1.55x — they're coastal feeders, ~1.15x is correct.
         var remainingAfterNext = 0;
         for(var i=bestSegEndIdx; i<latlngs.length-1; i++){
           var sk = dist(latlngs[i], latlngs[i+1]);
-          var m = sk > 2500 ? 2.1 : sk > 800 ? 1.55 : 1.1;
+          var m = routeMultiplier(latlngs[i], latlngs[i+1]);
           remainingAfterNext += sk * m;
         }
         var remainingAfterDays = remainingAfterNext / kmPerDay;
