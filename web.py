@@ -56,9 +56,63 @@ def get_vessel_position(mmsi: str) -> dict | None:
                 data = json.loads(result.stdout)
                 pos  = data.get('position', {})
                 if pos.get('lat'):
+                    # SMART VESSEL VALIDATION:
+                    # We need to distinguish three cases:
+                    #  (a) Known Toyota PCC → trust fully (verified)
+                    #  (b) Unknown MMSI but plausibly a new Toyota carrier → show with warning
+                    #  (c) Clearly NOT a Toyota outbound vessel → reject hard
+                    #
+                    # Hard-reject signals (any one means it's not our cargo):
+                    #  - AIS destination starts with "JP " (heading INTO Japan = inbound,
+                    #    not Toyota outbound from Nagoya/Yokohama/etc.)
+                    #  - Vessel name doesn't match any PCC naming pattern AND not in our list
+                    #
+                    # PCC naming patterns (all major operators):
+                    #   K-Line: "* Highway"
+                    #   NYK:    "* Leader"
+                    #   MOL:    "* Ace" / "* Carrier"
+                    #   EUKOR:  "* Express"
+                    #   Hyundai Glovis: "Glovis *"
+                    #   Wallenius Wilhelmsen: "* Hawk" / "* Falcon" / etc.
+                    import re
+                    vname = pos.get('name') or TOYOTA_CARRIERS.get(mmsi, '')
+                    vdest = (pos.get('dest') or '').upper()
+                    is_known = bool(TOYOTA_CARRIERS.get(mmsi))
+                    # Hard reject: heading TO Japan (inbound, not Toyota outbound)
+                    if vdest.startswith('JP ') or vdest.startswith('JP-'):
+                        print(f"[vessel pos scraper] Rejected MMSI {mmsi}: AIS dest='{vdest}' "
+                              f"indicates INBOUND to Japan (Toyota cargo is OUTbound)",
+                              file=sys.stderr)
+                        return None
+                    # If known carrier, trust it
+                    if is_known:
+                        verified = True
+                    else:
+                        # Unknown MMSI — check if name looks like a PCC
+                        pcc_pattern = re.compile(
+                            r'\b(highway|leader|ace|carrier|cruiser|express|hawk|falcon|'
+                            r'eagle|crane|swan|breeze|harvest|spirit)\b',
+                            re.IGNORECASE
+                        )
+                        glovis_pattern = re.compile(r'^glovis\b', re.IGNORECASE)
+                        if vname and (pcc_pattern.search(vname) or glovis_pattern.search(vname)):
+                            verified = False  # plausibly a PCC, show with warning
+                            print(f"[vessel pos scraper] UNVERIFIED carrier: MMSI {mmsi} "
+                                  f"name='{vname}' — name fits PCC pattern, not in our database",
+                                  file=sys.stderr)
+                        elif not vname:
+                            # No name at all = MST didn't recognize it = almost certainly not Toyota
+                            print(f"[vessel pos scraper] Rejected MMSI {mmsi}: no vessel name "
+                                  f"resolved, not a known carrier", file=sys.stderr)
+                            return None
+                        else:
+                            # Has a name but doesn't fit PCC pattern (e.g. tanker, container)
+                            print(f"[vessel pos scraper] Rejected MMSI {mmsi} name='{vname}': "
+                                  f"doesn't match any PCC naming pattern", file=sys.stderr)
+                            return None
                     return {
                         'mmsi':        mmsi,
-                        'name':        pos.get('name') or TOYOTA_CARRIERS.get(mmsi, 'Unknown'),
+                        'name':        vname or f'MMSI {mmsi}',
                         'lat':         pos['lat'],
                         'lon':         pos['lon'],
                         'speed':       pos.get('speed', 0),
@@ -67,6 +121,7 @@ def get_vessel_position(mmsi: str) -> dict | None:
                         'eta':         pos.get('eta', ''),
                         'updated':     pos.get('updated', ''),
                         'source':      pos.get('source', 'myshiptracking'),
+                        'verified':    verified,
                     }
         except Exception as e:
             print(f"[vessel pos scraper] {e}", file=sys.stderr)
@@ -1879,6 +1934,13 @@ TRACKER_PAGE = BASE + """
           <div class="vessel-card-label">
             <span class="vessel-pulse"></span>Vessel detected · Live
             <span class="vessel-stale" id="vessel-stale" style="display:none;">Updated ?h ago</span>
+            <span id="vessel-unverified" style="display:none;margin-left:8px;
+                  background:rgba(227,179,65,0.15);border:1px solid rgba(227,179,65,0.4);
+                  border-radius:10px;padding:1px 8px;font-size:10px;color:#e3b341;
+                  font-weight:500;cursor:help;"
+                  title="This MMSI is not in our Toyota carrier database. The name matches a PCC pattern, so it may be a new charter — but please verify on MyShipTracking.">
+              ⚠ Unverified carrier
+            </span>
           </div>
           <div class="vessel-card-name" id="vessel-name">—</div>
           <div class="vessel-card-meta">
@@ -2178,7 +2240,11 @@ TRACKER_PAGE = BASE + """
     {% if show_vessel %}
     var vesselMarker = null;
     var vesselPulse = null;
-    function loadVessel(mmsi, name, lat, lng, speed, course, dest, eta, ageMin) {
+    function loadVessel(mmsi, name, lat, lng, speed, course, dest, eta, ageMin, verified) {
+      // verified: true if MMSI in TOYOTA_CARRIERS (known carrier), false if name fits
+      // a PCC pattern but MMSI is unknown (possibly new Toyota charter we haven't catalogued).
+      // Default true if not passed (backward compat with direct calls).
+      if (verified == null) verified = true;
       if (vesselMarker) map.removeLayer(vesselMarker);
       if (vesselPulse) map.removeLayer(vesselPulse);
       // Rotation: AIS course (0-360°). Default 0 if missing.
@@ -2303,6 +2369,12 @@ TRACKER_PAGE = BASE + """
           } else {
             staleEl.style.display = 'none';
           }
+        }
+        // Unverified-carrier badge (shown when MMSI is not in TOYOTA_CARRIERS
+        // but vessel name matches PCC naming pattern — possibly a new charter)
+        var unvEl = document.getElementById('vessel-unverified');
+        if(unvEl){
+          unvEl.style.display = verified ? 'none' : 'inline-block';
         }
         // Voyage progress line
         renderVoyageProgress(lat, lng, dest, eta);
@@ -2659,10 +2731,11 @@ TRACKER_PAGE = BASE + """
         var legOverride = overrides[leg];
         hasUserDate = !!(legOverride && legOverride.depart_date);
         // dateReliable comes from server-side _lf_bounded flag (computed from
-        // step_durations: requires buildInProgress exit observed AND real temporal
-        // gap before leftTheFactory date). Login frequency alone isn't enough —
-        // if first-ever login already caught the order at leftTheFactory, no amount
-        // of subsequent logins makes that date reliable.
+        // step_durations: requires buildInProgress.observed=1, which means we
+        // witnessed the BIP exit transition = leftTheFactory entry).
+        // Login frequency alone isn't enough — if first-ever login already caught
+        // the order at leftTheFactory, no amount of subsequent logins makes that
+        // date reliable.
         var lfBounded = {{ 'true' if order._lf_bounded else 'false' }};
         var dateReliable = hasUserDate || hasKnownVessel || lfBounded;
 
@@ -2674,7 +2747,7 @@ TRACKER_PAGE = BASE + """
             if(skel0) skel0.style.display = 'none';
             var prompt = document.getElementById('vessel-date-prompt');
             if(prompt) prompt.style.display = 'block';
-            return;  // bail out of the .then chain
+            return;
           }
           // Show skeleton while detection runs
           var skel = document.getElementById('vessel-skeleton');
@@ -2692,7 +2765,7 @@ TRACKER_PAGE = BASE + """
                   var t = new Date(d.updated.replace(' ','T')+'Z');
                   if(!isNaN(t)) ageMin = Math.floor((Date.now()-t.getTime())/60000);
                 }
-                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin);
+                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin,d.verified);
               }
             })
             .catch(()=>{ if(skel) skel.style.display='none'; });
@@ -3210,14 +3283,11 @@ def index():
                     bip_row = next((r for r in obs_rows if r[0] == 'buildInProgress'), None)
                     lf_observed = lf_row[3] if lf_row else 0
                     # leftTheFactory date is RELIABLE if either:
-                    #  (a) leftTheFactory's own transition out was witnessed, OR
-                    #  (b) buildInProgress was observed (observed=1 means date_entered AND date_left
-                    #      AND they differ — i.e. we witnessed BIP exiting, which IS LF entering).
-                    #      The dates being equal is correct (same login captures both at once);
-                    #      what matters is that BIP had a proper observed lifecycle.
-                    if lf_observed == 1:
-                        details['_lf_bounded'] = True
-                    elif bip_row and bip_row[3] == 1:
+                    #  (a) leftTheFactory.observed == 1 (full lifecycle witnessed), OR
+                    #  (b) buildInProgress.observed == 1 (BIP exit = LF entry, same observation)
+                    # Same-day dates are correct here: when one login captures the transition,
+                    # both BIP.date_left and LF.date_entered are set to that login's date.
+                    if lf_observed == 1 or (bip_row and bip_row[3] == 1):
                         details['_lf_bounded'] = True
                     else:
                         details['_lf_bounded'] = False
@@ -3342,18 +3412,24 @@ def api_vessel_detect(order_hash):
                     LIMIT 1
                 """, (order_hash, mmsi)).fetchone()
                 if cached and cached["vessel_lat"] and not stale_position:
-                    return jsonify({
-                        "mmsi":        cached["vessel_mmsi"],
-                        "name":        cached["vessel_name"],
-                        "lat":         float(cached["vessel_lat"]),
-                        "lon":         float(cached["vessel_lon"]),
-                        "speed":       float(cached["vessel_speed"] or 0),
-                        "course":      (float(cached["vessel_course"]) if cached["vessel_course"] not in (None, 0, 0.0) else None),
-                        "destination": cached["vessel_dest"] or "",
-                        "eta":         cached["vessel_eta"] or "",
-                        "cached":      True, "leg": leg_override,
-                        "berth_verified": bool(berth_verified),
-                    })
+                    # If we have fresh position but NULL dest/eta, force a refresh
+                    # to backfill them — likely a leftover from before fast-path fix.
+                    if not cached["vessel_dest"] and not cached["vessel_eta"]:
+                        pass  # fall through to refresh below
+                    else:
+                        return jsonify({
+                            "mmsi":        cached["vessel_mmsi"],
+                            "name":        cached["vessel_name"],
+                            "lat":         float(cached["vessel_lat"]),
+                            "lon":         float(cached["vessel_lon"]),
+                            "speed":       float(cached["vessel_speed"] or 0),
+                            "course":      (float(cached["vessel_course"]) if cached["vessel_course"] not in (None, 0, 0.0) else None),
+                            "destination": cached["vessel_dest"] or "",
+                            "eta":         cached["vessel_eta"] or "",
+                            "cached":      True, "leg": leg_override,
+                            "berth_verified": bool(berth_verified),
+                            "verified": cached["vessel_mmsi"] in TOYOTA_CARRIERS,
+                        })
                 # Position stale — refresh position only, keep vessel identity
                 pos = get_vessel_position(mmsi)
                 if pos:
