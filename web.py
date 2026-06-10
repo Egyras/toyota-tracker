@@ -2016,18 +2016,20 @@ TRACKER_PAGE = BASE + """
 
     <!-- Vessel auto-detection runs automatically, inline controls below for manual override -->
 
-    <!-- Vessel date prompt — shown when leftTheFactory date is NOT reliable
-         (i.e. no observed buildInProgress→leftTheFactory transition; the date we have
-         is just when the user first logged in and found the order already past factory) -->
+    <!-- Vessel date prompt — shown when:
+         (a) leftTheFactory date is NOT reliable (BIP→LF transition not observed), OR
+         (b) date was set but auto-detection found no European-bound PCC matching
+         The user can either correct the date or enter the MMSI directly from MyShipTracking. -->
     <div id="vessel-date-prompt" style="display:none;margin-bottom:1.25rem;padding:12px 16px;
          background:rgba(229,0,26,0.06);border:1px solid rgba(229,0,26,0.2);
          border-radius:8px;font-size:13px;line-height:1.65;">
       <div style="font-weight:600;color:var(--text);margin-bottom:6px;">
-        🚢 Carrier unknown — we need the actual factory departure date
+        🚢 Carrier unknown — help us identify your vessel
       </div>
       <div style="color:var(--muted);">
-        When you first opened this tracker, your car had already left the factory.
-        We didn't witness the actual transition, so any auto-detected vessel would be a guess.
+        We couldn't automatically identify the carrier for your order. Either we didn't
+        witness the factory departure transition, or no European-bound Toyota PCC matched
+        the date we have.
         <br><br>
         Toyota sent you an email when your car left the factory
         (subject: <em>"Your vehicle has left the factory"</em> or similar).
@@ -2037,11 +2039,11 @@ TRACKER_PAGE = BASE + """
         <br><br>
         <span style="font-size:11px;opacity:0.85;">
           📅 <strong>Note:</strong> Port departure data is only available for the last ~20 days.
-          If your car left the factory more than three weeks ago, you may need to enter the
-          MMSI directly — find your ship at
+          If your car left the factory more than three weeks ago — or if you already entered
+          the date and detection still failed — find your ship at
           <a href="https://www.myshiptracking.com" target="_blank"
-             style="color:#e3b341;">MyShipTracking</a> and paste the number into the
-          <strong>MMSI</strong> field.
+             style="color:#e3b341;">MyShipTracking</a> and paste the MMSI directly into the
+          <strong>MMSI</strong> field below.
         </span>
       </div>
     </div>
@@ -2816,6 +2818,11 @@ TRACKER_PAGE = BASE + """
                   if(!isNaN(t)) ageMin = Math.floor((Date.now()-t.getTime())/60000);
                 }
                 loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin,d.verified);
+              } else if(d.error || !d.mmsi){
+                // Detection failed — no European-bound PCC matched.
+                // Show the carrier-unknown prompt so user can correct the date or enter MMSI.
+                var prompt = document.getElementById('vessel-date-prompt');
+                if(prompt) prompt.style.display = 'block';
               }
             })
             .catch(()=>{ if(skel) skel.style.display='none'; });
