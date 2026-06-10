@@ -83,7 +83,6 @@ var TOYOTA_CARRIERS={
   "432988000":"Libra Leader",
   "431946000":"Leo Leader",
   "477816600":"Danube Highway",
-  "636024024":"Vela Leader",      // NYK PCC, IMO 9158288
 };
 
 // IMO lookup for berth verification — MMSI -> IMO
@@ -112,7 +111,6 @@ var VESSEL_IMO = {
   "432988000":"9342882",  // Libra Leader
   "431946000":"9342918",  // Leo Leader
   "477816600":"9388595",  // Danube Highway
-  "636024024":"9158288",  // Vela Leader (NYK)
 };
 
 // Map delivery location names to detection leg

@@ -38,8 +38,45 @@ TOYOTA_CARRIERS = {
     "432988000": "Libra Leader",
     "431946000": "Leo Leader",
     "477816600": "Danube Highway",
-    "636024024": "Vela Leader",       # NYK PCC, IMO 9158288 — Asia/Americas/Europe rotation
+    # Note: Vela Leader (MMSI 636024024) is a real NYK PCC but serves Asia/Americas/Europe
+    # routes. We deliberately keep her unverified so the destination filter is the gate —
+    # she's only "correct" for European orders when AIS dest indicates a European port.
 }
+
+def is_wrong_continent_for_order(vessel_dest: str, order_dest_country: str) -> bool:
+    """Return True if vessel's AIS destination is on a completely different
+    continent than the order's destination — e.g. order to France, vessel to Taipei.
+    Used to reject obviously-wrong vessel matches even when MMSI is in TOYOTA_CARRIERS
+    (since carriers serve multiple routes and prior detection cache may be stale).
+    """
+    if not vessel_dest or not order_dest_country:
+        return False
+    vdest = vessel_dest.upper()
+    order_eu = order_dest_country.upper() in {
+        'FRANCE','GERMANY','BELGIUM','NETHERLANDS','UNITED KINGDOM','IRELAND',
+        'SPAIN','ITALY','PORTUGAL','GREECE','POLAND','LITHUANIA','LATVIA',
+        'ESTONIA','FINLAND','SWEDEN','NORWAY','DENMARK','CZECH REPUBLIC',
+        'SLOVAKIA','SLOVENIA','HUNGARY','CROATIA','AUSTRIA','SWITZERLAND',
+        'ROMANIA','BULGARIA','CYPRUS'
+    }
+    non_eu_prefixes = ('TW ','TW-','CN ','CN-','KR ','KR-','US ','US-',
+                       'CA ','CA-','CL ','CL-','BR ','BR-','AR ','AR-',
+                       'AU ','AU-','NZ ','NZ-','MX ','MX-','PE ','PE-',
+                       'TH ','TH-','MY ','MY-','PH ','PH-','VN ','VN-',
+                       'IN ','IN-','ZA ','ZA-')
+    non_eu_keywords = ('TAIPEI','KAOHSIUNG','SHANGHAI','BUSAN','LONG BEACH',
+                       'LOS ANGELES','SAN ANTONIO','IQUIQUE','BRUNSWICK',
+                       'DAVISVILLE','BALTIMORE','VERACRUZ','SYDNEY',
+                       'MELBOURNE','AUCKLAND','HONG KONG',
+                       'BANGKOK','MANILA')
+    if not order_eu:
+        return False  # only flag for EU-bound orders (most of our use case)
+    if any(vdest.startswith(p) for p in non_eu_prefixes):
+        return True
+    if any(k in vdest for k in non_eu_keywords) and 'SINGAPORE' not in vdest:
+        return True
+    return False
+
 
 def get_vessel_position(mmsi: str, order_dest_country: str = None) -> dict | None:
     """Get vessel position — scrape MyShipTracking first (free), fallback to aisstream/DataDocked."""
@@ -77,45 +114,12 @@ def get_vessel_position(mmsi: str, order_dest_country: str = None) -> dict | Non
                               f"indicates INBOUND to Japan (Toyota cargo is OUTbound)",
                               file=sys.stderr)
                         return None
-                    # 2. Hard reject: destination is on a completely different continent
-                    #    than what our order is heading to. The order country comes from the
-                    #    DB lookup chain; the AIS dest's region is from rough lat/lon or
-                    #    LOCODE country prefix in the dest text.
-                    if vdest and order_dest_country:
-                        wrong_continent = False
-                        order_eu = order_dest_country in {
-                            'FRANCE','GERMANY','BELGIUM','NETHERLANDS','UNITED KINGDOM','IRELAND',
-                            'SPAIN','ITALY','PORTUGAL','GREECE','POLAND','LITHUANIA','LATVIA',
-                            'ESTONIA','FINLAND','SWEDEN','NORWAY','DENMARK','CZECH REPUBLIC',
-                            'SLOVAKIA','SLOVENIA','HUNGARY','CROATIA','AUSTRIA','SWITZERLAND',
-                            'ROMANIA','BULGARIA','CYPRUS'
-                        }
-                        # AIS dest patterns suggesting non-European destinations
-                        # Common port codes: TW (Taiwan), CN (China), KR (Korea), US/CA (Americas),
-                        # CL/BR/AR (South America), AU (Australia)
-                        non_eu_prefixes = ('TW ','TW-','CN ','CN-','KR ','KR-','US ','US-',
-                                          'CA ','CA-','CL ','CL-','BR ','BR-','AR ','AR-',
-                                          'AU ','AU-','NZ ','NZ-','MX ','MX-','PE ','PE-',
-                                          'TH ','TH-','MY ','MY-','PH ','PH-','VN ','VN-',
-                                          'IN ','IN-','ZA ','ZA-')
-                        non_eu_keywords = ('TAIPEI','KAOHSIUNG','SHANGHAI','BUSAN','LONG BEACH',
-                                          'LOS ANGELES','SAN ANTONIO','IQUIQUE','BRUNSWICK',
-                                          'DAVISVILLE','BALTIMORE','VERACRUZ','SYDNEY',
-                                          'MELBOURNE','AUCKLAND','SINGAPORE','HONG KONG',
-                                          'BANGKOK','MANILA')
-                        if order_eu:
-                            if any(vdest.startswith(p) for p in non_eu_prefixes):
-                                wrong_continent = True
-                            elif any(k in vdest for k in non_eu_keywords):
-                                # Singapore can be a bunker stop on the way to Europe, allow it
-                                # but flag the others
-                                if 'SINGAPORE' not in vdest:
-                                    wrong_continent = True
-                        if wrong_continent:
-                            print(f"[vessel pos scraper] Rejected MMSI {mmsi} name='{vname}': "
-                                  f"order is to {order_dest_country} but AIS dest='{vdest}' "
-                                  f"(wrong continent)", file=sys.stderr)
-                            return None
+                    # 2. Hard reject: destination on different continent
+                    if is_wrong_continent_for_order(vdest, order_dest_country):
+                        print(f"[vessel pos scraper] Rejected MMSI {mmsi} name='{vname}': "
+                              f"order is to {order_dest_country} but AIS dest='{vdest}' "
+                              f"(wrong continent)", file=sys.stderr)
+                        return None
                     # If known carrier, trust it
                     if is_known:
                         verified = True
@@ -3468,9 +3472,28 @@ def api_vessel_detect(order_hash):
                     LIMIT 1
                 """, (order_hash, mmsi)).fetchone()
                 if cached and cached["vessel_lat"] and not stale_position:
+                    # Re-validate cached vessel: even if MMSI is "berth-verified" from a
+                    # prior detection, the vessel may have changed direction since. If the
+                    # cached destination is on the wrong continent for the order, clear the
+                    # cache and fall through to re-detection.
+                    if is_wrong_continent_for_order(cached["vessel_dest"] or "", order_dest_country):
+                        print(f"[api_vessel_detect] Clearing stale cache for order={order_hash[:10]}: "
+                              f"cached vessel {cached['vessel_name']} heading to "
+                              f"'{cached['vessel_dest']}' but order is to "
+                              f"{order_dest_country} (wrong continent)", file=sys.stderr)
+                        db.execute("""UPDATE checks SET vessel_mmsi=NULL, vessel_name=NULL,
+                                      vessel_lat=NULL, vessel_lon=NULL, vessel_speed=NULL,
+                                      vessel_course=NULL, vessel_dest=NULL, vessel_eta=NULL,
+                                      vessel_updated=NULL WHERE order_hash=?""", (order_hash,))
+                        db.execute("""UPDATE vessel_overrides SET detected_mmsi=NULL,
+                                      detected_name=NULL, berth_verified=0
+                                      WHERE order_hash=? AND leg=?""",
+                                   (order_hash, leg_override))
+                        db.commit()
+                        # Fall through to re-detection
                     # If we have fresh position but NULL dest/eta, force a refresh
                     # to backfill them — likely a leftover from before fast-path fix.
-                    if not cached["vessel_dest"] and not cached["vessel_eta"]:
+                    elif not cached["vessel_dest"] and not cached["vessel_eta"]:
                         pass  # fall through to refresh below
                     else:
                         return jsonify({
