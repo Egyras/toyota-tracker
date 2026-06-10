@@ -162,8 +162,8 @@ async function verifyBerth(mmsi, imo, departDate, leg) {
     var data = await resp.json();
     var points = Array.isArray(data) ? data : (data.data || data.points || []);
     var lf = new Date(departDate+'T00:00:00Z');
-    var window_start = new Date(lf.getTime() - 7*86400000);
-    // Only stationary points within the time window
+    var window_start = new Date(lf.getTime() - 6*86400000);
+    // Only stationary points within the time window (D-6 to D, before email arrival)
     var window_pts = points.filter(function(p){
       if(!p.lat || !p.lng) return false;
       var t = new Date(p.updated);
@@ -474,15 +474,19 @@ if(MMSI){
   var carriers = LEG === "nagoya" ? CARRIERS_LEG1 :
                  LEG === "zeebrugge" || LEG === "malmo" ? CARRIERS_LEG2 : CARRIERS_LEG1;
 
-  // Departure window logic (per forum research):
-  // - Ship leaves Nagoya E5 berth 1-2 days BEFORE leftTheFactory notification
-  // - But DB records leftTheFactory when user first logs in, which may be days AFTER the notification
-  // So real departure = D_date - login_gap - 2.
-  // We search: 2 days AFTER D (catches early logins) back to 7 days BEFORE D (catches late logins).
-  // Total window: D-7 to D+2 days, centred just before the recorded date.
+  // Departure window logic (calibrated from observed cases):
+  // - Toyota's "left the factory" notification arrives ~1-7 days AFTER the ship
+  //   actually sailed (logistics delay between car loading and status update).
+  //   Observed gaps: Bishu Highway/Triton Leader = 5 days (LT-1, FR-3 cases).
+  // - Therefore the ship MUST have departed BEFORE the user-entered date.
+  // - Days AFTER the entered date are logically wrong (the ship can't depart after
+  //   the email announcing its departure) — searching them only adds noise like
+  //   same-day arrivals (e.g. Vela Leader at Nagoya for loading, not departing).
+  // Window: D-6 to D-1 — 6 days, all strictly before the recorded date.
+  // Covers the observed 5-day gap with a 1-day safety margin.
   var lf=new Date(D+"T00:00:00Z");
-  var start=Math.floor((lf.getTime()-7*86400000)/1000);
-  var end=Math.floor((lf.getTime()+2*86400000)/1000);
+  var start=Math.floor((lf.getTime()-6*86400000)/1000);
+  var end  =Math.floor((lf.getTime()-1*86400000)/1000);
   var u="https://www.myshiptracking.com/ports-arrivals-departures/?mmsi=&pid="+pid+"&type=2&time="+start+"_"+end+"&pp=200";
   process.stderr.write("Port "+LEG+" (pid:"+pid+") URL: "+u+"\n");
   await pg.goto(u,{timeout:30000});
@@ -745,8 +749,8 @@ if(MMSI){
     process.stderr.write('Reverse-lookup: checking '+Object.keys(TOYOTA_CARRIERS).length+
                          ' known Toyota carriers for E5 visits around '+D+'...\n');
     var depMs = new Date(D+"T00:00:00Z").getTime();
-    var winStart = depMs - 7*86400000;   // D-7
-    var winEnd   = depMs + 2*86400000;   // D+2
+    var winStart = depMs - 6*86400000;   // D-6 (6 days before email)
+    var winEnd   = depMs - 1*86400000;   // D-1 (strictly before email arrival)
     // E5 berth box (same as NAGOYA_BERTHS[0])
     var E5_LAT = [35.048, 35.062], E5_LON = [136.875, 136.892];
 
