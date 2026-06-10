@@ -38,9 +38,10 @@ TOYOTA_CARRIERS = {
     "432988000": "Libra Leader",
     "431946000": "Leo Leader",
     "477816600": "Danube Highway",
+    "636024024": "Vela Leader",       # NYK PCC, IMO 9158288 — Asia/Americas/Europe rotation
 }
 
-def get_vessel_position(mmsi: str) -> dict | None:
+def get_vessel_position(mmsi: str, order_dest_country: str = None) -> dict | None:
     """Get vessel position — scrape MyShipTracking first (free), fallback to aisstream/DataDocked."""
     # Try MST scraper (free, same login we use for detection)
     if MST_EMAIL and MST_PASSWORD:
@@ -56,34 +57,65 @@ def get_vessel_position(mmsi: str) -> dict | None:
                 data = json.loads(result.stdout)
                 pos  = data.get('position', {})
                 if pos.get('lat'):
-                    # SMART VESSEL VALIDATION:
-                    # We need to distinguish three cases:
-                    #  (a) Known Toyota PCC → trust fully (verified)
-                    #  (b) Unknown MMSI but plausibly a new Toyota carrier → show with warning
-                    #  (c) Clearly NOT a Toyota outbound vessel → reject hard
+                    # SMART VESSEL VALIDATION — multi-criteria:
+                    #  Hard-reject signals (any one means it's not our cargo):
+                    #   1. AIS dest = "JP *" (inbound to Japan, not Toyota outbound)
+                    #   2. AIS dest is in a completely different region than the order's destination
+                    #      (e.g. order to France, but ship heading to TAIPEI / SAN ANTONIO)
+                    #   3. Vessel name doesn't fit any PCC naming pattern AND not in our list
                     #
-                    # Hard-reject signals (any one means it's not our cargo):
-                    #  - AIS destination starts with "JP " (heading INTO Japan = inbound,
-                    #    not Toyota outbound from Nagoya/Yokohama/etc.)
-                    #  - Vessel name doesn't match any PCC naming pattern AND not in our list
-                    #
-                    # PCC naming patterns (all major operators):
-                    #   K-Line: "* Highway"
-                    #   NYK:    "* Leader"
-                    #   MOL:    "* Ace" / "* Carrier"
-                    #   EUKOR:  "* Express"
-                    #   Hyundai Glovis: "Glovis *"
-                    #   Wallenius Wilhelmsen: "* Hawk" / "* Falcon" / etc.
+                    #  Soft signals:
+                    #   - MMSI in TOYOTA_CARRIERS = verified
+                    #   - Name fits PCC pattern but MMSI unknown = unverified (show with warning)
                     import re
                     vname = pos.get('name') or TOYOTA_CARRIERS.get(mmsi, '')
                     vdest = (pos.get('dest') or '').upper()
                     is_known = bool(TOYOTA_CARRIERS.get(mmsi))
-                    # Hard reject: heading TO Japan (inbound, not Toyota outbound)
+                    # 1. Hard reject: heading TO Japan (inbound)
                     if vdest.startswith('JP ') or vdest.startswith('JP-'):
                         print(f"[vessel pos scraper] Rejected MMSI {mmsi}: AIS dest='{vdest}' "
                               f"indicates INBOUND to Japan (Toyota cargo is OUTbound)",
                               file=sys.stderr)
                         return None
+                    # 2. Hard reject: destination is on a completely different continent
+                    #    than what our order is heading to. The order country comes from the
+                    #    DB lookup chain; the AIS dest's region is from rough lat/lon or
+                    #    LOCODE country prefix in the dest text.
+                    if vdest and order_dest_country:
+                        wrong_continent = False
+                        order_eu = order_dest_country in {
+                            'FRANCE','GERMANY','BELGIUM','NETHERLANDS','UNITED KINGDOM','IRELAND',
+                            'SPAIN','ITALY','PORTUGAL','GREECE','POLAND','LITHUANIA','LATVIA',
+                            'ESTONIA','FINLAND','SWEDEN','NORWAY','DENMARK','CZECH REPUBLIC',
+                            'SLOVAKIA','SLOVENIA','HUNGARY','CROATIA','AUSTRIA','SWITZERLAND',
+                            'ROMANIA','BULGARIA','CYPRUS'
+                        }
+                        # AIS dest patterns suggesting non-European destinations
+                        # Common port codes: TW (Taiwan), CN (China), KR (Korea), US/CA (Americas),
+                        # CL/BR/AR (South America), AU (Australia)
+                        non_eu_prefixes = ('TW ','TW-','CN ','CN-','KR ','KR-','US ','US-',
+                                          'CA ','CA-','CL ','CL-','BR ','BR-','AR ','AR-',
+                                          'AU ','AU-','NZ ','NZ-','MX ','MX-','PE ','PE-',
+                                          'TH ','TH-','MY ','MY-','PH ','PH-','VN ','VN-',
+                                          'IN ','IN-','ZA ','ZA-')
+                        non_eu_keywords = ('TAIPEI','KAOHSIUNG','SHANGHAI','BUSAN','LONG BEACH',
+                                          'LOS ANGELES','SAN ANTONIO','IQUIQUE','BRUNSWICK',
+                                          'DAVISVILLE','BALTIMORE','VERACRUZ','SYDNEY',
+                                          'MELBOURNE','AUCKLAND','SINGAPORE','HONG KONG',
+                                          'BANGKOK','MANILA')
+                        if order_eu:
+                            if any(vdest.startswith(p) for p in non_eu_prefixes):
+                                wrong_continent = True
+                            elif any(k in vdest for k in non_eu_keywords):
+                                # Singapore can be a bunker stop on the way to Europe, allow it
+                                # but flag the others
+                                if 'SINGAPORE' not in vdest:
+                                    wrong_continent = True
+                        if wrong_continent:
+                            print(f"[vessel pos scraper] Rejected MMSI {mmsi} name='{vname}': "
+                                  f"order is to {order_dest_country} but AIS dest='{vdest}' "
+                                  f"(wrong continent)", file=sys.stderr)
+                            return None
                     # If known carrier, trust it
                     if is_known:
                         verified = True
@@ -101,12 +133,10 @@ def get_vessel_position(mmsi: str) -> dict | None:
                                   f"name='{vname}' — name fits PCC pattern, not in our database",
                                   file=sys.stderr)
                         elif not vname:
-                            # No name at all = MST didn't recognize it = almost certainly not Toyota
                             print(f"[vessel pos scraper] Rejected MMSI {mmsi}: no vessel name "
                                   f"resolved, not a known carrier", file=sys.stderr)
                             return None
                         else:
-                            # Has a name but doesn't fit PCC pattern (e.g. tanker, container)
                             print(f"[vessel pos scraper] Rejected MMSI {mmsi} name='{vname}': "
                                   f"doesn't match any PCC naming pattern", file=sys.stderr)
                             return None
@@ -3387,9 +3417,19 @@ def api_vessel_detect(order_hash):
         FROM vessel_overrides WHERE order_hash=? AND leg=?
     """, (order_hash, leg_override)).fetchone()
 
+    # Get order's destination country (used by get_vessel_position to filter
+    # out vessels heading to the wrong continent — e.g. PCC bound for Taiwan
+    # when order is going to France)
+    dest_country_row = db.execute("""
+        SELECT dest_country FROM checks WHERE order_hash=?
+          AND dest_country IS NOT NULL AND dest_country != ''
+        ORDER BY ts DESC LIMIT 1
+    """, (order_hash,)).fetchone()
+    order_dest_country = (dest_country_row['dest_country'] if dest_country_row else None)
+
     # If user set MMSI manually, use it directly
     if override and override['mmsi'] and not depart_date_override:
-        pos = get_vessel_position(override['mmsi'])
+        pos = get_vessel_position(override['mmsi'], order_dest_country)
         if pos:
             return jsonify({**pos, "source": "user_override", "leg": leg_override})
 
@@ -3447,7 +3487,7 @@ def api_vessel_detect(order_hash):
                             "verified": cached["vessel_mmsi"] in TOYOTA_CARRIERS,
                         })
                 # Position stale — refresh position only, keep vessel identity
-                pos = get_vessel_position(mmsi)
+                pos = get_vessel_position(mmsi, order_dest_country)
                 if pos:
                     _cache_vessel(db, order_hash, pos, leg=leg_override)
                     return jsonify({**pos, "cached": False, "leg": leg_override,
@@ -3485,7 +3525,7 @@ def api_vessel_detect(order_hash):
                         "cached":      True,
                     })
                 else:
-                    pos = get_vessel_position(cached["vessel_mmsi"])
+                    pos = get_vessel_position(cached["vessel_mmsi"], order_dest_country)
                     if pos:
                         _cache_vessel(db, order_hash, pos, leg=leg_override)
                         return jsonify({**pos, "cached": False})
