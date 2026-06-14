@@ -337,23 +337,38 @@ async function getMstDetailHttp(mmsi, imo, name){
             //   - Anchor on "ETA*", "ETA:", or "Reported ETA" patterns specifically
             //   - Sanity check: captured date must be IN THE FUTURE (otherwise it's
             //     a stale departure timestamp like ATD, not an arrival ETA)
+            //   - Date and time captured SEPARATELY (HTML tags often split them)
             var eta = null;
+            // Each entry: [regex, captures date and (optional) time separately]
             var etaPatterns = [
-              /ETA\*[\s\S]{0,200}?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/,        // "ETA*" + datetime
-              /Reported ETA[\s\S]{0,200}?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/, // "Reported ETA" + datetime
-              /\bETA:[\s\S]{0,200}?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/,       // "ETA:" + datetime
-              /\bETA\b[\s\S]{0,200}?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/,      // bare "ETA" word + datetime
-              /ETA\*[\s\S]{0,300}?(\d{4}-\d{2}-\d{2})/,                       // "ETA*" + just date
-              /Reported ETA[\s\S]{0,300}?(\d{4}-\d{2}-\d{2})/,                // "Reported ETA" + just date
+              // Combined datetime patterns (preferred — date and time adjacent)
+              { re: /ETA\*[\s\S]{0,300}?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/,        time: false },
+              { re: /Reported ETA[\s\S]{0,300}?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/, time: false },
+              { re: /\bETA:[\s\S]{0,300}?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/,       time: false },
+              // Date and time captured separately (HTML tags can separate them)
+              { re: /ETA\*[\s\S]{0,300}?(\d{4}-\d{2}-\d{2})[\s\S]{0,80}?(\d{2}:\d{2})/,        time: true },
+              { re: /Reported ETA[\s\S]{0,300}?(\d{4}-\d{2}-\d{2})[\s\S]{0,80}?(\d{2}:\d{2})/, time: true },
+              // Fallback — just date, no time
+              { re: /ETA\*[\s\S]{0,400}?(\d{4}-\d{2}-\d{2})/,                       time: false },
+              { re: /Reported ETA[\s\S]{0,400}?(\d{4}-\d{2}-\d{2})/,                time: false },
+              { re: /\bETA\b[\s\S]{0,400}?(\d{4}-\d{2}-\d{2})/,                     time: false },
             ];
             var nowMs = Date.now();
             for(var pi=0; pi<etaPatterns.length; pi++){
-              var em = body.match(etaPatterns[pi]);
+              var em = body.match(etaPatterns[pi].re);
               if(em){
-                var candidate = em[1].trim();
+                var candidate;
+                if(etaPatterns[pi].time && em[2]){
+                  // Date + time captured separately, combine them
+                  candidate = em[1] + ' ' + em[2];
+                } else {
+                  candidate = em[1].trim();
+                }
                 // Sanity check: ETA must be in the future (or at most 1 day in the past
                 // for ETAs that just passed and weren't updated yet).
-                var candidateMs = new Date(candidate.replace(' ', 'T') + 'Z').getTime();
+                // For date-only candidates, treat as start-of-day.
+                var dtForCheck = candidate.length > 10 ? candidate : candidate + ' 00:00';
+                var candidateMs = new Date(dtForCheck.replace(' ', 'T') + 'Z').getTime();
                 if(isNaN(candidateMs)) continue;
                 if(candidateMs > nowMs - 86400000){  // future or <24h past
                   eta = candidate;

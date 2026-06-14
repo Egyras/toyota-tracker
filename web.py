@@ -3498,9 +3498,10 @@ def api_vessel_detect(order_hash):
                                    (order_hash, leg_override))
                         db.commit()
                         # Fall through to re-detection
-                    # If we have fresh position but NULL dest/eta, force a refresh
-                    # to backfill them — likely a leftover from before fast-path fix.
-                    elif not cached["vessel_dest"] and not cached["vessel_eta"]:
+                    # If we have fresh position but NULL dest OR eta, force a refresh
+                    # to backfill them — likely a leftover from before fast-path fix,
+                    # or a recently-cleared stale ETA.
+                    elif not cached["vessel_dest"] or not cached["vessel_eta"]:
                         pass  # fall through to refresh below
                     else:
                         return jsonify({
