@@ -329,17 +329,14 @@ async function getMstDetailHttp(mmsi, imo, name){
 
             // ETA: parse with strict patterns to avoid catching dates near
             // unrelated "eta" substrings (e.g. lowercase "eta" in <meta> tags,
-            // or "Reported" / position-update timestamps).
+            // or position-update timestamps).
             //
-            // MST's actual ETA label is uppercase "ETA" (often "ETA*" or "Reported ETA"),
-            // and the value is a future date. We use:
-            //   - Case-SENSITIVE matching (no /i flag) — only matches the real label
-            //   - Anchor on "ETA*", "ETA:", or "Reported ETA" patterns specifically
-            //   - Sanity check: captured date must be IN THE FUTURE (otherwise it's
-            //     a stale departure timestamp like ATD, not an arrival ETA)
+            // Strategy:
+            //   - Case-SENSITIVE matching (no /i flag) — only matches "ETA" label
+            //   - Anchor on "ETA*", "ETA:", or "Reported ETA"
             //   - Date and time captured SEPARATELY (HTML tags often split them)
+            //   - Sanity check: captured date must be IN THE FUTURE
             var eta = null;
-            // Each entry: [regex, captures date and (optional) time separately]
             var etaPatterns = [
               // Combined datetime patterns (preferred — date and time adjacent)
               { re: /ETA\*[\s\S]{0,300}?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/,        time: false },
@@ -359,18 +356,14 @@ async function getMstDetailHttp(mmsi, imo, name){
               if(em){
                 var candidate;
                 if(etaPatterns[pi].time && em[2]){
-                  // Date + time captured separately, combine them
                   candidate = em[1] + ' ' + em[2];
                 } else {
                   candidate = em[1].trim();
                 }
-                // Sanity check: ETA must be in the future (or at most 1 day in the past
-                // for ETAs that just passed and weren't updated yet).
-                // For date-only candidates, treat as start-of-day.
                 var dtForCheck = candidate.length > 10 ? candidate : candidate + ' 00:00';
                 var candidateMs = new Date(dtForCheck.replace(' ', 'T') + 'Z').getTime();
                 if(isNaN(candidateMs)) continue;
-                if(candidateMs > nowMs - 86400000){  // future or <24h past
+                if(candidateMs > nowMs - 86400000){
                   eta = candidate;
                   process.stderr.write('MST detail ETA: matched pattern '+pi+' → '+eta+'\n');
                   break;
@@ -634,10 +627,23 @@ if(MMSI){
               process.stderr.write(m.vessel+": off-route destination ("+liveDest+"), penalizing -20\n");
               m.europeScore -= 20;
             }
-            // Bonus: if already heading to a known Europe port, it's definitely the right ship
+            // Bonus: if already heading to a known Europe-rotation port, it's definitely the right ship
+            // This list includes:
+            //   - Northern Europe terminals (Zeebrugge, Bremerhaven, etc.)
+            //   - Mediterranean terminals where Toyota Europe receives cars (Sagunto, Livorno, Piraeus)
+            //   - Eastern Med/Turkey terminals (Derince — K-Line uses for Black Sea/Turkey distribution)
+            //   - Levant terminals (Limassol, Beirut, Iskenderun, Latakia — for Med rotation PCCs)
+            //   - Canaries (Las Palmas — common rotation stop)
+            //   - Transit waypoints (Singapore, Suez, Port Said)
+            // All of these mean "vessel is heading INTO the Europe-bound rotation".
             var EUROPE_DEST=['ZEEBRUGGE','BREMERHAVEN','SOUTHAMPTON','PORTBURY',
                              'SAGUNTO','LIVORNO','MALMO','GOTHENBURG','PIRAEUS','DRAMMEN',
-                             'ANTWERP','ROTTERDAM','SUEZ','PORT SAID'];
+                             'ANTWERP','ROTTERDAM','SUEZ','PORT SAID',
+                             'DERINCE','ISKENDERUN','LIMASSOL','BEIRUT','LATAKIA',  // Eastern Med
+                             'LAS PALMAS','CIVITAVECCHIA','GENOA','BARCELONA','VALENCIA',
+                             'KOPER','TRIESTE','RIJEKA','VENICE',                    // Adriatic
+                             'PALDISKI','HANKO','KOTKA','HELSINKI','KLAIPEDA','RIGA', // Baltic
+                             'HAMBURG','WILHELMSHAVEN','EMDEN'];                       // North Sea
             var isEuropeDest=EUROPE_DEST.some(function(d){return liveDest.indexOf(d)>=0;});
             if(isEuropeDest){
               process.stderr.write(m.vessel+": heading to Europe ("+liveDest+"), bonus +5\n");
