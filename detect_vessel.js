@@ -327,16 +327,43 @@ async function getMstDetailHttp(mmsi, imo, name){
             }
             if(matches.length > 0) dest = matches[matches.length - 1];
 
-            // ETA: try several patterns MST uses
+            // ETA: parse with strict patterns to avoid catching dates near
+            // unrelated "eta" substrings (e.g. lowercase "eta" in <meta> tags,
+            // or "Reported" / position-update timestamps).
+            //
+            // MST's actual ETA label is uppercase "ETA" (often "ETA*" or "Reported ETA"),
+            // and the value is a future date. We use:
+            //   - Case-SENSITIVE matching (no /i flag) — only matches the real label
+            //   - Anchor on "ETA*", "ETA:", or "Reported ETA" patterns specifically
+            //   - Sanity check: captured date must be IN THE FUTURE (otherwise it's
+            //     a stale departure timestamp like ATD, not an arrival ETA)
             var eta = null;
             var etaPatterns = [
-              /ETA[\s\S]{0,300}?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?:\s*UTC)?)/i,
-              /ETA[\s\S]{0,300}?<span class="line">(\d{4}-\d{2}-\d{2})<\/span>/i,
-              /ETA[\s\S]{0,400}?(\d{4}-\d{2}-\d{2})/i
+              /ETA\*[\s\S]{0,200}?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/,        // "ETA*" + datetime
+              /Reported ETA[\s\S]{0,200}?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/, // "Reported ETA" + datetime
+              /\bETA:[\s\S]{0,200}?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/,       // "ETA:" + datetime
+              /\bETA\b[\s\S]{0,200}?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})/,      // bare "ETA" word + datetime
+              /ETA\*[\s\S]{0,300}?(\d{4}-\d{2}-\d{2})/,                       // "ETA*" + just date
+              /Reported ETA[\s\S]{0,300}?(\d{4}-\d{2}-\d{2})/,                // "Reported ETA" + just date
             ];
+            var nowMs = Date.now();
             for(var pi=0; pi<etaPatterns.length; pi++){
               var em = body.match(etaPatterns[pi]);
-              if(em){ eta = em[1].trim(); break; }
+              if(em){
+                var candidate = em[1].trim();
+                // Sanity check: ETA must be in the future (or at most 1 day in the past
+                // for ETAs that just passed and weren't updated yet).
+                var candidateMs = new Date(candidate.replace(' ', 'T') + 'Z').getTime();
+                if(isNaN(candidateMs)) continue;
+                if(candidateMs > nowMs - 86400000){  // future or <24h past
+                  eta = candidate;
+                  process.stderr.write('MST detail ETA: matched pattern '+pi+' → '+eta+'\n');
+                  break;
+                } else {
+                  process.stderr.write('MST detail ETA: rejected stale candidate "'+candidate
+                    +'" (pattern '+pi+', '+Math.round((nowMs-candidateMs)/86400000)+'d in past)\n');
+                }
+              }
             }
 
             if(dest || eta){
