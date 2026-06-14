@@ -2781,15 +2781,23 @@ TRACKER_PAGE = BASE + """
         {% endfor %}
 
         var legOverride = overrides[leg];
-        hasUserDate = !!(legOverride && legOverride.depart_date);
-        // dateReliable comes from server-side _lf_bounded flag (computed from
-        // step_durations: requires buildInProgress.observed=1, which means we
-        // witnessed the BIP exit transition = leftTheFactory entry).
-        // Login frequency alone isn't enough — if first-ever login already caught
-        // the order at leftTheFactory, no amount of subsequent logins makes that
-        // date reliable.
+        // hasUserDate: depart_date must have been set BY THE USER (manual entry from
+        // their Toyota email). System-auto dates (source=auto) are first-login defaults
+        // — those have no relationship to actual factory departure and shouldn't be trusted.
+        hasUserDate = !!(legOverride && legOverride.depart_date && legOverride.source === 'user');
+        // hasUserMmsi: user explicitly typed an MMSI in the manual field
+        var hasUserMmsi = !!(legOverride && legOverride.mmsi);
+        // lfBounded: server confirms the buildInProgress→leftTheFactory transition was
+        // witnessed (requires step_durations.observed=1 for buildInProgress).
         var lfBounded = {{ 'true' if order._lf_bounded else 'false' }};
-        var dateReliable = hasUserDate || hasKnownVessel || lfBounded;
+        // dateReliable: we trust the detection result ONLY when ONE OF:
+        //   1. lfBounded — we witnessed the transition (most authoritative)
+        //   2. hasUserDate — user explicitly typed the email date (user-provided ground truth)
+        //   3. hasUserMmsi — user explicitly typed the MMSI (user-provided ground truth)
+        // NOTE: hasKnownVessel (cached from prior auto-detection) is NOT sufficient.
+        // A cached vessel found via auto-detection on an unreliable date is still a guess.
+        // The user should see the disclaimer to verify/correct, not a confident vessel card.
+        var dateReliable = lfBounded || hasUserDate || hasUserMmsi;
 
         if(hash){
           if(!dateReliable){
@@ -3498,10 +3506,9 @@ def api_vessel_detect(order_hash):
                                    (order_hash, leg_override))
                         db.commit()
                         # Fall through to re-detection
-                    # If we have fresh position but NULL dest OR eta, force a refresh
-                    # to backfill them — likely a leftover from before fast-path fix,
-                    # or a recently-cleared stale ETA.
-                    elif not cached["vessel_dest"] or not cached["vessel_eta"]:
+                    # If we have fresh position but NULL dest/eta, force a refresh
+                    # to backfill them — likely a leftover from before fast-path fix.
+                    elif not cached["vessel_dest"] and not cached["vessel_eta"]:
                         pass  # fall through to refresh below
                     else:
                         return jsonify({
