@@ -2703,6 +2703,51 @@ TRACKER_PAGE = BASE + """
         var x=Math.sin(dLat/2)**2+Math.cos(a[0]*Math.PI/180)*Math.cos(b[0]*Math.PI/180)*Math.sin(dLon/2)**2;
         return 2*R*Math.asin(Math.sqrt(x));
       }
+      // Find distance to nearest hub in the route. If vessel is FAR from any hub
+      // (>500 km), she's in the deep-sea phase before reaching first European hub.
+      // The closest-segment heuristic gives nonsense in that case (picks whichever
+      // hub happens to be at a closer latitude by coincidence), so we short-circuit
+      // and show "Toyota City → <AIS destination>" instead.
+      var nearestHubKm = Infinity;
+      for(var i=0; i<latlngs.length; i++){
+        var d = dist([lat,lng], latlngs[i]);
+        if(d < nearestHubKm) nearestHubKm = d;
+      }
+      if(nearestHubKm > 500){
+        // Deep-sea phase — vessel not yet at any tracked hub.
+        // Show Toyota City → current AIS destination from the vessel,
+        // with progress estimated against the total Asia→first-hub distance.
+        fromEl.textContent = 'Toyota City';
+        toEl.textContent = destText ? destText.split(',')[0] : 'Europe';
+        // Estimate deep-sea progress: distance traveled vs typical 18,000 km Asia→Europe
+        // Use 6300 km from Toyota City (35°N, 137°E) as a rough "current position progress" anchor
+        var toyotaCity = [35.18, 136.91];
+        var traveledFromOrigin = dist([lat,lng], toyotaCity);
+        var typicalAsiaToEurope = 18000; // km via Suez
+        var deepSeaPct = Math.min(95, Math.max(0, (traveledFromOrigin/typicalAsiaToEurope)*100));
+        bar.style.width = deepSeaPct.toFixed(1)+'%';
+        pctEl.textContent = deepSeaPct.toFixed(0)+'%';
+        // Hide the leg-based "next stop" since this is the deep-sea phase, not a hub-to-hub leg
+        var nextStopEl = document.getElementById('voyage-next-stop');
+        var nextDestEl = document.getElementById('voyage-next-dest');
+        var nextEtaEl  = document.getElementById('voyage-next-eta');
+        if(nextStopEl && destText && eta){
+          var etaDate = new Date(eta.replace(' UTC','Z').replace(/^(\d{4}-\d{2}-\d{2}) /,'$1T'));
+          if(!isNaN(etaDate.getTime()) && etaDate > Date.now()){
+            var msLeft = etaDate - Date.now();
+            var dLeft = Math.floor(msLeft/86400000);
+            var hLeft = Math.floor((msLeft%86400000)/3600000);
+            var timeStr = dLeft > 0 ? 'in '+dLeft+'d '+hLeft+'h' : 'in '+hLeft+'h';
+            if(nextDestEl) nextDestEl.textContent = destText;
+            if(nextEtaEl)  nextEtaEl.textContent  = timeStr;
+            nextStopEl.style.display = 'block';
+          } else {
+            nextStopEl.style.display = 'none';
+          }
+        } else if(nextStopEl) { nextStopEl.style.display = 'none'; }
+        return;
+      }
+      // Vessel is near a European hub — use segment-based progress
       // Total route distance
       var totalKm=0, segs=[];
       for(var i=1;i<latlngs.length;i++){
