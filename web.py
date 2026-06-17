@@ -330,7 +330,7 @@ def get_db():
             -- migrate: add created_on if upgrading from older schema
             CREATE TABLE IF NOT EXISTS _migrations (id INTEGER PRIMARY KEY);
         """)
-        # add created_on column if missing (safe on existing DBs)
+        # add created_on column if missing (safe on existing DBs) fix
         cols = [r[1] for r in db.execute("PRAGMA table_info(checks)").fetchall()]
         if 'created_on' not in cols:
             db.execute("ALTER TABLE checks ADD COLUMN created_on TEXT")
