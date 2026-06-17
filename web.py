@@ -1099,6 +1099,10 @@ a:hover{color:var(--red);}
   background:linear-gradient(180deg,rgba(210,153,34,.18) 0%,rgba(210,153,34,.08) 100%);
   color:#f0c674;border:1px solid #9e6a03;
 }
+.badge-ontrack{
+  background:linear-gradient(180deg,rgba(70,180,90,.14) 0%,rgba(70,180,90,.06) 100%);
+  color:#7bd189;border:1px solid #2f7a3a;
+}
 
 /* INFO GRID */
 .info-grid{display:grid;grid-template-columns:1fr 1fr;gap:.4rem 2rem;}
@@ -1804,8 +1808,21 @@ TRACKER_PAGE = BASE + """
       </div>
     </div>
     <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;">
-      {% if st.isDelayed %}<span class="badge badge-delayed">⚠ Delayed</span>{% endif %}
-      {% if st.damageCode %}<span class="badge badge-delayed">⚡ {{ st.damageCode }}</span>{% endif %}
+      {% if st.isDelayed %}
+        <span class="badge badge-delayed">⚠ Delayed</span>
+      {% else %}
+        <span class="badge badge-ontrack">✓ No delays</span>
+      {% endif %}
+      {% if st.damageCode %}
+        <span class="badge badge-delayed">⚡ {{ st.damageCode }}</span>
+      {% else %}
+        <span class="badge badge-ontrack">✓ No damage</span>
+      {% endif %}
+      {% if st.callOffStatus == 'Called off' %}
+        <span class="badge badge-ontrack">✓ Called off</span>
+      {% elif st.callOffStatus %}
+        <span class="badge badge-pending">{{ st.callOffStatus }}</span>
+      {% endif %}
       <span class="badge badge-current">{{ st.currentStatus }}</span>
     </div>
   </div>
@@ -1831,7 +1848,7 @@ TRACKER_PAGE = BASE + """
       </div>
       <div class="info-row">
         <span class="info-label">Est. delivery</span>
-        <span class="info-value">{{ order.etaToFinalDestination or order.currentStatus.estimatedDeliveryToFinalDestination or 'N/A' }}</span>
+        <span class="info-value">{{ order.etaToFinalDestination or 'N/A' }}</span>
       </div>
       <div class="info-row">
         <span class="info-label">Order date</span>
