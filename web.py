@@ -1818,11 +1818,6 @@ TRACKER_PAGE = BASE + """
       {% else %}
         <span class="badge badge-ontrack">✓ No damage</span>
       {% endif %}
-      {% if st.callOffStatus == 'Called off' %}
-        <span class="badge badge-ontrack">✓ Called off</span>
-      {% elif st.callOffStatus %}
-        <span class="badge badge-pending">{{ st.callOffStatus }}</span>
-      {% endif %}
       <span class="badge badge-current">{{ st.currentStatus }}</span>
     </div>
   </div>
