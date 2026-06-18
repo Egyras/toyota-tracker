@@ -2361,30 +2361,29 @@ TRACKER_PAGE = BASE + """
             if(_d(dCoords, latlngs[pi]) < 150){ nearPlanned = true; break; }
           }
           if(!nearPlanned && latlngs.length > 0){
-            // Find next planned hub after current position
-            var nextHubIdx = -1, bestPD = Infinity;
-            for(var i=1;i<latlngs.length;i++){
-              var d = Math.min(_d([lat,lng], latlngs[i-1]), _d([lat,lng], latlngs[i]));
-              if(d < bestPD){ bestPD = d; nextHubIdx = i; }
-            }
-            if(nextHubIdx > 0){
-              var nextHub = latlngs[nextHubIdx];
-              // Draw detour: vessel → dest port → next planned hub
-              window.vesselDetourLine = L.polyline(
-                [[lat,lng], dCoords, nextHub],
-                {color:'#f59e0b', weight:2.5, dashArray:'8 6', opacity:0.85}
-              ).addTo(map);
-              // Mark the detour port
-              var detourIcon = L.divIcon({
-                className:'',
-                html:'<div style="width:14px;height:14px;border-radius:50%;background:#f59e0b;'+
-                     'border:2px solid #fff;box-shadow:0 0 8px rgba(245,158,11,0.6);"></div>',
-                iconSize:[14,14], iconAnchor:[7,7]
-              });
-              window.vesselDetourMarker = L.marker(dCoords, {icon: detourIcon})
-                .addTo(map)
-                .bindPopup('<b>Detour stop</b><br>'+dest+'<br><small style="color:#aaa">Vessel\\'s next AIS destination</small>');
-            }
+            // Draw detour: vessel's current position → AIS-reported destination port ONLY.
+            // We deliberately do NOT draw a third leg on to "the next planned hub" —
+            // that leg was being chosen as the closest-by-distance waypoint to the
+            // vessel's *current* position, which for a ship still deep into a long
+            // ocean leg (e.g. mid-Atlantic, or just past a Med port) can resolve to a
+            // hub that is geographically nowhere near the real onward route (e.g.
+            // snapping straight to Vilnius from Derince, cutting through Eastern
+            // Europe on a flat Leaflet line). Showing only the verified vessel→AIS-dest
+            // segment avoids ever drawing a misleading "shortcut through land" line.
+            window.vesselDetourLine = L.polyline(
+              [[lat,lng], dCoords],
+              {color:'#f59e0b', weight:2.5, dashArray:'8 6', opacity:0.85}
+            ).addTo(map);
+            // Mark the detour port
+            var detourIcon = L.divIcon({
+              className:'',
+              html:'<div style="width:14px;height:14px;border-radius:50%;background:#f59e0b;'+
+                   'border:2px solid #fff;box-shadow:0 0 8px rgba(245,158,11,0.6);"></div>',
+              iconSize:[14,14], iconAnchor:[7,7]
+            });
+            window.vesselDetourMarker = L.marker(dCoords, {icon: detourIcon})
+              .addTo(map)
+              .bindPopup('<b>Next AIS stop</b><br>'+dest+'<br><small style="color:#aaa">Vessel\\'s reported destination</small>');
           }
         }
       }
