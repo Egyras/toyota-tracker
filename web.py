@@ -193,9 +193,17 @@ def infer_route_passage(lat, lon, prev_lat=None, prev_lon=None):
     return None  # still in open ocean before the decision point
 
 
+# Bump this whenever get_real_route()'s computation logic changes (e.g. a
+# bugfix to how passages/restrictions are applied). Old cache rows under a
+# previous version are never matched by a new key, so they're automatically
+# orphaned rather than being served forever — this is what caught us out
+# when a real routing bugfix didn't show up on the map because the OLD,
+# buggy geometry was still sitting in route_cache under the same key.
+ROUTE_CACHE_VERSION = 2  # v2: fixed cape-branch leg2 backtracking through Suez
+
 def _route_cache_key(o_lat, o_lon, d_lat, d_lon, passage):
     """Round coords so minor AIS jitter still hits the cache."""
-    return f"{passage}:{round(o_lat,1)},{round(o_lon,1)}->{round(d_lat,1)},{round(d_lon,1)}"
+    return f"v{ROUTE_CACHE_VERSION}:{passage}:{round(o_lat,1)},{round(o_lon,1)}->{round(d_lat,1)},{round(d_lon,1)}"
 
 
 def get_real_route(db, origin, dest, passage):
