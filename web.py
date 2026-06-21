@@ -230,9 +230,23 @@ def get_real_route(db, origin, dest, passage):
     try:
         if passage == 'cape':
             # Force the geometry around Africa by routing via a pinned
-            # waypoint south of the Cape, in two legs.
-            leg1 = sr.searoute([o_lon, o_lat], [CAPE_OF_GOOD_HOPE_LATLON[1], CAPE_OF_GOOD_HOPE_LATLON[0]])
-            leg2 = sr.searoute([CAPE_OF_GOOD_HOPE_LATLON[1], CAPE_OF_GOOD_HOPE_LATLON[0]], [d_lon, d_lat])
+            # waypoint south of the Cape, in two legs. CRITICAL: both legs
+            # must explicitly restrict Suez. Without this, when origin is
+            # already near/at the Cape waypoint (e.g. computing the
+            # REMAINING leg from a vessel currently at the Cape onward to a
+            # Mediterranean/Turkish port), searoute's default shortest-path
+            # behavior on leg2 (Cape -> dest) will happily route back up
+            # through the Indian Ocean and through Suez — since that IS
+            # geographically shorter than continuing around via the
+            # Atlantic/Gibraltar. That produced a route that visually
+            # doubled back and crossed Suez even though we'd locked this
+            # vessel into the Cape passage. Restricting Suez here forces
+            # leg2 to continue via Gibraltar instead, matching the passage
+            # the vessel actually committed to.
+            leg1 = sr.searoute([o_lon, o_lat], [CAPE_OF_GOOD_HOPE_LATLON[1], CAPE_OF_GOOD_HOPE_LATLON[0]],
+                                restrictions=['suez'])
+            leg2 = sr.searoute([CAPE_OF_GOOD_HOPE_LATLON[1], CAPE_OF_GOOD_HOPE_LATLON[0]], [d_lon, d_lat],
+                                restrictions=['suez'])
             coords = list(leg1.geometry.coordinates) + list(leg2.geometry.coordinates)[1:]
             total_km = leg1.properties['length'] + leg2.properties['length']
         else:
