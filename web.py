@@ -78,6 +78,161 @@ def is_wrong_continent_for_order(vessel_dest: str, order_dest_country: str) -> b
     return False
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Real sea-route rendering (replaces straight-line "detour" guesses)
+# ─────────────────────────────────────────────────────────────────────────
+# Toyota Motor's main Japan PCC loading terminal (Toyota City / Tahara / Mikawa
+# area, served via Nagoya). Used as the deep-sea route origin.
+TOYOTA_CITY_LATLON = (35.18, 136.91)
+
+# Open-water waypoint just south of the Cape of Good Hope. We split any
+# Cape-route calculation into two `searoute` legs through this point because
+# a single Japan→Europe searoute() call (even with Suez restricted) can pick
+# a Northern Sea Route or wrap the date line instead of going around Africa —
+# pinning a known waypoint forces the geometry we actually want.
+CAPE_OF_GOOD_HOPE_LATLON = (-34.8, 20.0)
+
+# Rough bounding boxes used to tell, from the vessel's OWN current AIS
+# position, which passage it has already committed to. We never assume a
+# fleet-wide policy (e.g. "K-Line always avoids Suez") because that's a
+# business decision that can change — we only trust where the ship actually
+# is right now.
+def infer_route_passage(lat, lon, prev_lat=None, prev_lon=None):
+    """
+    Return 'cape', 'suez', or None (still ambiguous / too early in the
+    voyage to tell) based on the vessel's current position.
+
+    None is returned for most of the Pacific/Indian Ocean transit, since a
+    ship there could still go either way — we deliberately don't guess.
+    """
+    if lat is None or lon is None:
+        return None
+    lon = ((lon + 180) % 360) - 180  # normalize to -180..180
+
+    # Already south of the equator in the Indian Ocean, west of Indonesia —
+    # this is open water that's only on the route if heading for the Cape
+    # (the Suez-bound lane stays north of about 10°S the whole way).
+    if lat < -8 and 20 <= lon <= 100:
+        return 'cape'
+
+    # Already in the South Atlantic past the Cape (west side of Africa,
+    # southern hemisphere) — Cape route confirmed.
+    if lat < -20 and -15 <= lon <= 22:
+        return 'cape'
+
+    # In the Gulf of Aden / Bab-el-Mandeb approach or the Red Sea itself —
+    # committed to the Suez route.
+    if 10 <= lat <= 31 and 32 <= lon <= 44:
+        return 'suez'
+
+    # Through Suez into the Med, still tracking east of Crete — only reachable
+    # via Suez (the Cape route enters the Med from the west, near Gibraltar).
+    if 30 <= lat <= 37 and 24 <= lon <= 34:
+        return 'suez'
+
+    return None  # still in open ocean before the decision point
+
+
+def _route_cache_key(o_lat, o_lon, d_lat, d_lon, passage):
+    """Round coords so minor AIS jitter still hits the cache."""
+    return f"{passage}:{round(o_lat,1)},{round(o_lon,1)}->{round(d_lat,1)},{round(d_lon,1)}"
+
+
+def get_real_route(db, origin, dest, passage):
+    """
+    Return (geojson_linestring_coords, total_km) for a real sea route from
+    origin to dest, respecting the given passage ('cape' or 'suez').
+    Results are cached in route_cache since searoute() takes ~0.1-0.3s and
+    the shape barely changes leg to leg.
+
+    origin / dest: (lat, lon) tuples.
+    """
+    o_lat, o_lon = origin
+    d_lat, d_lon = dest
+    key = _route_cache_key(o_lat, o_lon, d_lat, d_lon, passage)
+
+    row = db.execute(
+        "SELECT route_json, route_km FROM route_cache WHERE cache_key=?", (key,)
+    ).fetchone()
+    if row:
+        try:
+            return json.loads(row["route_json"]), row["route_km"]
+        except Exception:
+            pass  # fall through and recompute if cache row is corrupt
+
+    try:
+        import searoute as sr
+    except ImportError:
+        print("[get_real_route] searoute not installed — falling back to straight line",
+              file=sys.stderr)
+        return None, None
+
+    try:
+        if passage == 'cape':
+            # Force the geometry around Africa by routing via a pinned
+            # waypoint south of the Cape, in two legs.
+            leg1 = sr.searoute([o_lon, o_lat], [CAPE_OF_GOOD_HOPE_LATLON[1], CAPE_OF_GOOD_HOPE_LATLON[0]])
+            leg2 = sr.searoute([CAPE_OF_GOOD_HOPE_LATLON[1], CAPE_OF_GOOD_HOPE_LATLON[0]], [d_lon, d_lat])
+            coords = list(leg1.geometry.coordinates) + list(leg2.geometry.coordinates)[1:]
+            total_km = leg1.properties['length'] + leg2.properties['length']
+        else:
+            # Suez (or unknown-but-default-shortest) — restrict the
+            # Northern Sea Route only, let it use Suez since that's the
+            # shorter lane and matches a vessel we've confirmed is using it.
+            route = sr.searoute([o_lon, o_lat], [d_lon, d_lat], restrictions=['northwest'])
+            coords = list(route.geometry.coordinates)
+            total_km = route.properties['length']
+    except Exception as e:
+        print(f"[get_real_route] searoute failed: {e}", file=sys.stderr)
+        return None, None
+
+    # Normalize any longitude wraparound (>180 or <-180) defensively —
+    # searoute occasionally returns unwrapped coords for paths that cross
+    # the antimeridian.
+    norm_coords = [[((lon + 180) % 360) - 180, lat] for lon, lat in coords]
+
+    try:
+        db.execute(
+            "INSERT OR REPLACE INTO route_cache (cache_key, passage, route_json, route_km, cached_at) "
+            "VALUES (?, ?, ?, ?, datetime('now'))",
+            (key, passage, json.dumps(norm_coords), total_km)
+        )
+        db.commit()
+    except Exception as e:
+        print(f"[get_real_route] cache write failed: {e}", file=sys.stderr)
+
+    return norm_coords, total_km
+
+
+def get_locked_passage(db, order_hash, leg, mmsi, lat, lon):
+    """
+    Return the passage ('cape'/'suez') to use for this order+leg's route
+    line. Once a passage is inferred with confidence, it's locked in so a
+    single noisy AIS ping near the decision zone (e.g. lat/lon jitter right
+    at the edge of a bounding box) doesn't make the line flicker between
+    shapes on every poll. Re-inference only happens if no lock exists yet.
+    """
+    row = db.execute(
+        "SELECT passage FROM route_passage_locked WHERE order_hash=? AND leg=?",
+        (order_hash, leg)
+    ).fetchone()
+    if row:
+        return row["passage"]
+
+    passage = infer_route_passage(lat, lon)
+    if passage:
+        try:
+            db.execute(
+                "INSERT OR REPLACE INTO route_passage_locked (order_hash, leg, mmsi, passage, locked_at) "
+                "VALUES (?, ?, ?, ?, datetime('now'))",
+                (order_hash, leg, mmsi, passage)
+            )
+            db.commit()
+        except Exception as e:
+            print(f"[get_locked_passage] lock write failed: {e}", file=sys.stderr)
+    return passage  # may be None if still ambiguous — caller falls back to straight line
+
+
 def get_vessel_position(mmsi: str, order_dest_country: str = None) -> dict | None:
     """Get vessel position — scrape MyShipTracking first (free), fallback to aisstream/DataDocked."""
     # Try MST scraper (free, same login we use for detection)
@@ -353,6 +508,29 @@ def get_db():
                 lat    REAL,
                 lng    REAL,
                 cached_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        # Real sea-route cache (searoute results are expensive to recompute —
+        # cache by rounded origin/dest coords + passage choice). Also stores,
+        # per order+leg, the last *inferred* passage (cape/suez) so a vessel
+        # near the ambiguous decision zone doesn't flip-flop on AIS jitter.
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS route_cache (
+                cache_key   TEXT PRIMARY KEY,
+                passage     TEXT NOT NULL,
+                route_json  TEXT NOT NULL,
+                route_km    REAL,
+                cached_at   TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS route_passage_locked (
+                order_hash  TEXT NOT NULL,
+                leg         TEXT NOT NULL,
+                mmsi        TEXT,
+                passage     TEXT NOT NULL,
+                locked_at   TEXT DEFAULT (datetime('now')),
+                UNIQUE(order_hash, leg)
             )
         """)
         db.commit()
@@ -2288,11 +2466,15 @@ TRACKER_PAGE = BASE + """
     {% if show_vessel %}
     var vesselMarker = null;
     var vesselPulse = null;
-    function loadVessel(mmsi, name, lat, lng, speed, course, dest, eta, ageMin, verified) {
+    function loadVessel(mmsi, name, lat, lng, speed, course, dest, eta, ageMin, verified, routeGeojson, routeKm, routePassage) {
       // verified: true if MMSI in TOYOTA_CARRIERS (known carrier), false if name fits
       // a PCC pattern but MMSI is unknown (possibly new Toyota charter we haven't catalogued).
       // Default true if not passed (backward compat with direct calls).
       if (verified == null) verified = true;
+      // Stash for renderVoyageProgress to use for accurate deep-sea progress %.
+      window.currentRouteGeojson = routeGeojson || null;
+      window.currentRouteKm = routeKm || null;
+      window.currentRoutePassage = routePassage || null;
       if (vesselMarker) map.removeLayer(vesselMarker);
       if (vesselPulse) map.removeLayer(vesselPulse);
       // Rotation: AIS course (0-360°). Default 0 if missing.
@@ -2331,6 +2513,20 @@ TRACKER_PAGE = BASE + """
           (eta?'ETA: '+eta+'<br>':'')+
           '<small style="color:#aaa">MMSI: '+mmsi+'</small>'
         );
+      // Draw the real sailed route (Toyota City → current position) if the
+      // backend was able to determine which passage (Cape/Suez) the vessel
+      // actually committed to. This replaces the old straight-line guess —
+      // it's a real maritime-network path (via searoute), not a flat line
+      // cutting through land. We keep this separate from the "detour" line
+      // below, which only fires when the AIS-reported destination itself
+      // is off the planned hub route.
+      if(window.vesselRealRouteLine){ map.removeLayer(window.vesselRealRouteLine); window.vesselRealRouteLine = null; }
+      if(routeGeojson && routeGeojson.length > 1){
+        var latlngRoute = routeGeojson.map(function(c){ return [c[1], c[0]]; }); // [lon,lat] -> [lat,lng]
+        window.vesselRealRouteLine = L.polyline(latlngRoute, {
+          color:'#f59e0b', weight:2.5, dashArray:'8 6', opacity:0.85
+        }).addTo(map);
+      }
       // Extend map bounds to include vessel
       var bounds = latlngs.length > 0 ? L.latLngBounds(latlngs) : L.latLngBounds([[lat,lng],[lat,lng]]);
       bounds.extend([lat, lng]);
@@ -2343,11 +2539,15 @@ TRACKER_PAGE = BASE + """
         }).addTo(map);
       }
       // If vessel is on a detour (AIS dest is off the planned route), draw it as
-      // an orange dashed line: current pos → detour port → next planned hub.
+      // an orange dashed line: current pos → detour port.
       // Visually communicates "ship is doing this extra stop before continuing."
+      // NOTE: only draw this straight-line detour indicator when we do NOT
+      // already have a real route line above — if we have the real geometry,
+      // the AIS destination is already represented as the end of that path,
+      // so a second straight-line marker would be redundant/conflicting.
       if(window.vesselDetourLine){ map.removeLayer(window.vesselDetourLine); window.vesselDetourLine = null; }
       if(window.vesselDetourMarker){ map.removeLayer(window.vesselDetourMarker); window.vesselDetourMarker = null; }
-      if(dest && typeof resolvePort === 'function' && !isStale){
+      if(dest && typeof resolvePort === 'function' && !isStale && !window.vesselRealRouteLine){
         var dCoords = resolvePort(dest);
         if(dCoords){
           // Check it's off-route
@@ -2370,6 +2570,8 @@ TRACKER_PAGE = BASE + """
             // snapping straight to Vilnius from Derince, cutting through Eastern
             // Europe on a flat Leaflet line). Showing only the verified vessel→AIS-dest
             // segment avoids ever drawing a misleading "shortcut through land" line.
+            // This straight-line fallback only appears when we couldn't get a real
+            // route (passage still ambiguous) — see condition above.
             window.vesselDetourLine = L.polyline(
               [[lat,lng], dCoords],
               {color:'#f59e0b', weight:2.5, dashArray:'8 6', opacity:0.85}
@@ -2728,11 +2930,54 @@ TRACKER_PAGE = BASE + """
       if(nearestHubKm > 500){
         fromEl.textContent = 'Toyota City';
         toEl.textContent = destText ? destText.split(',')[0] : 'Europe';
-        // Estimate deep-sea progress from how far traveled from Toyota City
-        var toyotaCity = [35.18, 136.91];
-        var traveledFromOrigin = dist([lat,lng], toyotaCity);
-        var typicalAsiaToEurope = 18000; // km via Suez
-        var deepSeaPct = Math.min(95, Math.max(0, (traveledFromOrigin/typicalAsiaToEurope)*100));
+        var deepSeaPct;
+        var realRoute = window.currentRouteGeojson;
+        var realRouteKm = window.currentRouteKm;
+        if(realRoute && realRoute.length > 1 && realRouteKm){
+          // We have the REAL sailed-route geometry (from searoute, respecting
+          // whichever passage — Cape or Suez — the vessel actually committed
+          // to). Project the vessel's current position onto this path and
+          // sum cumulative distance along it, same approach used for the
+          // European-hub segment progress below, just with many more points.
+          // route coords are [lon,lat] pairs ending at the vessel's current
+          // position (see enrich_with_route on the backend), so by
+          // construction the vessel sits at the END of this path — meaning
+          // distance traveled = total route length so far. We still find the
+          // closest point defensively in case of any drift/rounding.
+          var routeLatLng = realRoute.map(function(c){ return [c[1], c[0]]; });
+          var cum = 0, segDists = [];
+          for(var ri=1; ri<routeLatLng.length; ri++){
+            var sd = dist(routeLatLng[ri-1], routeLatLng[ri]);
+            segDists.push(sd);
+            cum += sd;
+          }
+          // Find closest point on the path to current vessel position (should
+          // be the last point or very near it, by construction)
+          var bestRi = routeLatLng.length - 1, bestRd = Infinity;
+          for(var ri2=0; ri2<routeLatLng.length; ri2++){
+            var rd = dist([lat,lng], routeLatLng[ri2]);
+            if(rd < bestRd){ bestRd = rd; bestRi = ri2; }
+          }
+          var traveledKm = 0;
+          for(var ri3=0; ri3<bestRi; ri3++){ traveledKm += segDists[ri3] || 0; }
+          // Remaining real-route distance from here to the AIS destination is
+          // unknown (we only computed Toyota City -> current position), so we
+          // estimate total voyage length as traveledKm scaled by a typical
+          // Asia->Europe sailed-distance ratio for whichever passage was used.
+          var typicalTotal = (window.currentRoutePassage === 'cape') ? 24000 : 19000;
+          deepSeaPct = Math.min(95, Math.max(0, (traveledKm/typicalTotal)*100));
+        } else {
+          // No real route available yet (passage still ambiguous — vessel is
+          // deep in open ocean before committing to Cape or Suez). Fall back
+          // to the straight-line estimate as a rough placeholder; this under/
+          // over-estimates depending on how curved the eventual path turns
+          // out to be, but it's clearly provisional and self-corrects once
+          // the backend can lock in a real route.
+          var toyotaCity = [35.18, 136.91];
+          var traveledFromOrigin = dist([lat,lng], toyotaCity);
+          var typicalAsiaToEurope = 18000; // km via Suez
+          deepSeaPct = Math.min(95, Math.max(0, (traveledFromOrigin/typicalAsiaToEurope)*100));
+        }
         bar.style.width = deepSeaPct.toFixed(1)+'%';
         pctEl.textContent = deepSeaPct.toFixed(0)+'%';
         // Show next-stop ETA from AIS (vessel's reported destination + ETA)
@@ -2878,7 +3123,7 @@ TRACKER_PAGE = BASE + """
                   var t = new Date(d.updated.replace(' ','T')+'Z');
                   if(!isNaN(t)) ageMin = Math.floor((Date.now()-t.getTime())/60000);
                 }
-                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin,d.verified);
+                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin,d.verified,d.route_geojson,d.route_km,d.route_passage);
               } else if(d.error || !d.mmsi){
                 // Detection failed — no European-bound PCC matched.
                 // Show the carrier-unknown prompt so user can correct the date or enter MMSI.
@@ -2904,7 +3149,7 @@ TRACKER_PAGE = BASE + """
                   var t = new Date(d.updated.replace(' ','T')+'Z');
                   if(!isNaN(t)) ageMin = Math.floor((Date.now()-t.getTime())/60000);
                 }
-                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin);
+                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin,null,d.route_geojson,d.route_km,d.route_passage);
               }
             })
             .catch(()=>{ if(skel2) skel2.style.display='none'; });
@@ -3463,6 +3708,35 @@ def api_vessel(mmsi):
         return jsonify(error="no position data"), 404
     return jsonify(pos)
 
+def enrich_with_route(db, resp, order_hash, leg):
+    """
+    Given a vessel response dict (must have lat/lon and optionally mmsi),
+    add route_geojson/route_km/route_passage fields describing the REAL
+    sea route from Toyota City to the vessel's current position, if we can
+    determine which passage (Cape vs Suez) it actually took.
+
+    If the passage is still ambiguous (vessel deep in open ocean, hasn't
+    reached either decision zone yet), route_geojson is left out entirely —
+    the frontend falls back to its existing straight-line estimate rather
+    than rendering a guessed shape.
+    """
+    lat, lon = resp.get("lat"), resp.get("lon")
+    if lat is None or lon is None:
+        return resp
+    try:
+        passage = get_locked_passage(db, order_hash, leg, resp.get("mmsi"), float(lat), float(lon))
+        if not passage:
+            return resp  # ambiguous — let frontend use its straight-line fallback
+        coords, total_km = get_real_route(db, TOYOTA_CITY_LATLON, (float(lat), float(lon)), passage)
+        if coords:
+            resp["route_geojson"] = coords  # [[lon,lat], ...] from Toyota City to current position
+            resp["route_km"] = total_km
+            resp["route_passage"] = passage
+    except Exception as e:
+        print(f"[enrich_with_route] failed for order={order_hash[:10]}: {e}", file=sys.stderr)
+    return resp
+
+
 @app.route("/api/vessel-detect/<order_hash>", methods=["GET", "POST"])
 def api_vessel_detect(order_hash):
     db = get_db()
@@ -3503,7 +3777,7 @@ def api_vessel_detect(order_hash):
     if override and override['mmsi'] and not depart_date_override:
         pos = get_vessel_position(override['mmsi'], order_dest_country)
         if pos:
-            return jsonify({**pos, "source": "user_override", "leg": leg_override})
+            return jsonify(enrich_with_route(db, {**pos, "source": "user_override", "leg": leg_override}, order_hash, leg_override))
 
     # Check leg-aware cache in vessel_overrides first
     if not depart_date_override and not mmsi_override:
@@ -3564,7 +3838,7 @@ def api_vessel_detect(order_hash):
                     elif not cached["vessel_dest"] and not cached["vessel_eta"]:
                         pass  # fall through to refresh below
                     else:
-                        return jsonify({
+                        return jsonify(enrich_with_route(db, {
                             "mmsi":        cached["vessel_mmsi"],
                             "name":        cached["vessel_name"],
                             "lat":         float(cached["vessel_lat"]),
@@ -3576,13 +3850,13 @@ def api_vessel_detect(order_hash):
                             "cached":      True, "leg": leg_override,
                             "berth_verified": bool(berth_verified),
                             "verified": cached["vessel_mmsi"] in TOYOTA_CARRIERS,
-                        })
+                        }, order_hash, leg_override))
                 # Position stale — refresh position only, keep vessel identity
                 pos = get_vessel_position(mmsi, order_dest_country)
                 if pos:
                     _cache_vessel(db, order_hash, pos, leg=leg_override)
-                    return jsonify({**pos, "cached": False, "leg": leg_override,
-                                    "berth_verified": bool(berth_verified)})
+                    return jsonify(enrich_with_route(db, {**pos, "cached": False, "leg": leg_override,
+                                    "berth_verified": bool(berth_verified)}, order_hash, leg_override))
             # Identity stale and not berth-verified — fall through to re-detect
 
         # Fallback: check checks table (legacy, no leg info)
@@ -3604,7 +3878,7 @@ def api_vessel_detect(order_hash):
                 stale = (age is None or age[0] is None or age[0] > 6)
 
                 if not stale:
-                    return jsonify({
+                    return jsonify(enrich_with_route(db, {
                         "mmsi":        cached["vessel_mmsi"],
                         "name":        cached["vessel_name"],
                         "lat":         float(cached["vessel_lat"]),
@@ -3614,13 +3888,13 @@ def api_vessel_detect(order_hash):
                         "destination": cached["vessel_dest"] or "",
                         "eta":         cached["vessel_eta"] or "",
                         "cached":      True,
-                    })
+                    }, order_hash, leg_override))
                 else:
                     pos = get_vessel_position(cached["vessel_mmsi"], order_dest_country)
                     if pos:
                         _cache_vessel(db, order_hash, pos, leg=leg_override)
-                        return jsonify({**pos, "cached": False})
-                    return jsonify({
+                        return jsonify(enrich_with_route(db, {**pos, "cached": False}, order_hash, leg_override))
+                    return jsonify(enrich_with_route(db, {
                         "mmsi":        cached["vessel_mmsi"],
                         "name":        cached["vessel_name"],
                         "lat":         float(cached["vessel_lat"]),
@@ -3630,7 +3904,7 @@ def api_vessel_detect(order_hash):
                         "destination": cached["vessel_dest"] or "",
                         "eta":         cached["vessel_eta"] or "",
                         "cached":      True, "stale": True,
-                    })
+                    }, order_hash, leg_override))
 
     # Determine departure date to use
     if depart_date_override:
@@ -3720,7 +3994,7 @@ def api_vessel_detect(order_hash):
     _cache_vessel(db, order_hash, vessel, leg=leg_override)
     db.commit()
 
-    return jsonify({k: v for k, v in vessel.items() if not k.startswith("_")})
+    return jsonify(enrich_with_route(db, {k: v for k, v in vessel.items() if not k.startswith("_")}, order_hash, leg_override))
 
 @app.route("/api/vessel-overrides/<order_hash>")
 def api_vessel_overrides(order_hash):
