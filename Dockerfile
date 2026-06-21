@@ -17,8 +17,7 @@ RUN git clone https://github.com/rmudingay/toyota.git /tmp/toyota \
     && rm -rf /tmp/toyota
 
 # Install Python dependencies (no playwright here - using Node version)
-# searoute: computes real maritime sea-routes (used for vessel route line on map)
-RUN pip install --no-cache-dir requests flask searoute
+RUN pip install --no-cache-dir requests flask
 
 # Install Node Playwright locally in /app so require('playwright') works
 WORKDIR /app
