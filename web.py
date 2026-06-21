@@ -92,6 +92,66 @@ TOYOTA_CITY_LATLON = (35.18, 136.91)
 # pinning a known waypoint forces the geometry we actually want.
 CAPE_OF_GOOD_HOPE_LATLON = (-34.8, 20.0)
 
+# Mirrors the client-side PORT_COORDS table (see resolvePort() in the page
+# template) so the BACKEND can also resolve an AIS destination string like
+# "DERINCE" into coordinates — needed to compute the real remaining-leg
+# route (current position -> AIS destination), not just the traveled leg.
+# Keep these two tables in sync if either is updated.
+PORT_COORDS_PY = {
+    'DERINCE':      (40.760,  29.834),
+    'SAGUNTO':      (39.640,  -0.218),
+    'LIVORNO':      (43.548,  10.305),
+    'PIRAEUS':      (37.940,  23.640),
+    'LIMASSOL':     (34.670,  33.040),
+    'ISKENDERUN':   (36.595,  36.175),
+    'LAS PALMAS':   (28.140, -15.420),
+    'BEIRUT':       (33.900,  35.500),
+    'ZEEBRUGGE':    (51.320,   3.215),
+    'BREMERHAVEN':  (53.580,   8.580),
+    'SOUTHAMPTON':  (50.900,  -1.420),
+    'MALMO':        (55.620,  13.000),
+    'MALMÖ':        (55.620,  13.000),
+    'PALDISKI':     (59.350,  24.080),
+    'HAMBURG':      (53.530,   9.950),
+    'ROTTERDAM':    (51.970,   4.150),
+    'DRAMMEN':      (59.745,  10.220),
+    'NAGOYA':       (35.183, 136.910),
+    'TOYOTA CITY':  (35.180, 136.910),
+    'YOKOHAMA':     (35.455, 139.650),
+    'KOBE':         (34.680, 135.200),
+    'HITACHI':      (36.490, 140.650),
+    'SHIMIZU':      (35.013, 138.500),
+    'YOKKAICHI':    (34.965, 136.620),
+    'SINGAPORE':    ( 1.270, 103.840),
+    'SUEZ':         (29.970,  32.560),
+    'SG SIN':       ( 1.270, 103.840),
+    'TR DRC':       (40.760,  29.834),
+    'TR DER':       (40.760,  29.834),
+    'ES SAG':       (39.640,  -0.218),
+    'BE ZEE':       (51.320,   3.215),
+    'DE BRV':       (53.580,   8.580),
+    'NL RTM':       (51.970,   4.150),
+}
+
+
+def resolve_port_py(dest_text):
+    """Python mirror of the client-side resolvePort() — resolves an AIS
+    destination string (e.g. 'DERINCE' or 'TR DRC FREE ZONE') to (lat, lon),
+    or None if no match. Used to compute the remaining-leg real route."""
+    if not dest_text:
+        return None
+    t = dest_text.upper().strip()
+    if t in PORT_COORDS_PY:
+        return PORT_COORDS_PY[t]
+    for key, coords in PORT_COORDS_PY.items():
+        if len(key) > 3 and key in t:
+            return coords
+    for word in __import__('re').split(r'[\s,\-_]+', t):
+        if len(word) > 3 and word in PORT_COORDS_PY:
+            return PORT_COORDS_PY[word]
+    return None
+
+
 # Rough bounding boxes used to tell, from the vessel's OWN current AIS
 # position, which passage it has already committed to. We never assume a
 # fleet-wide policy (e.g. "K-Line always avoids Suez") because that's a
@@ -2466,7 +2526,7 @@ TRACKER_PAGE = BASE + """
     {% if show_vessel %}
     var vesselMarker = null;
     var vesselPulse = null;
-    function loadVessel(mmsi, name, lat, lng, speed, course, dest, eta, ageMin, verified, routeGeojson, routeKm, routePassage) {
+    function loadVessel(mmsi, name, lat, lng, speed, course, dest, eta, ageMin, verified, routeGeojson, routeKm, routePassage, routeRemainingGeojson) {
       // verified: true if MMSI in TOYOTA_CARRIERS (known carrier), false if name fits
       // a PCC pattern but MMSI is unknown (possibly new Toyota charter we haven't catalogued).
       // Default true if not passed (backward compat with direct calls).
@@ -2527,6 +2587,30 @@ TRACKER_PAGE = BASE + """
           color:'#f59e0b', weight:2.5, dashArray:'8 6', opacity:0.85
         }).addTo(map);
       }
+      // Draw the PREDICTED remaining leg (current position → AIS-reported
+      // destination, e.g. Derince), using the same real sea-route geometry
+      // and the same locked passage as the sailed leg above — so the line
+      // continues smoothly in the same direction rather than disagreeing.
+      // Styled lighter/more transparent since this part hasn't been sailed
+      // yet — it's a prediction, not a confirmed track.
+      if(window.vesselRemainingRouteLine){ map.removeLayer(window.vesselRemainingRouteLine); window.vesselRemainingRouteLine = null; }
+      if(window.vesselRemainingRouteMarker){ map.removeLayer(window.vesselRemainingRouteMarker); window.vesselRemainingRouteMarker = null; }
+      if(routeRemainingGeojson && routeRemainingGeojson.length > 1){
+        var latlngRemaining = routeRemainingGeojson.map(function(c){ return [c[1], c[0]]; });
+        window.vesselRemainingRouteLine = L.polyline(latlngRemaining, {
+          color:'#f59e0b', weight:2, dashArray:'3 7', opacity:0.45
+        }).addTo(map);
+        var endPt = latlngRemaining[latlngRemaining.length-1];
+        var detourIcon = L.divIcon({
+          className:'',
+          html:'<div style="width:14px;height:14px;border-radius:50%;background:#f59e0b;'+
+               'border:2px solid #fff;box-shadow:0 0 8px rgba(245,158,11,0.6);"></div>',
+          iconSize:[14,14], iconAnchor:[7,7]
+        });
+        window.vesselRemainingRouteMarker = L.marker(endPt, {icon: detourIcon})
+          .addTo(map)
+          .bindPopup('<b>Next AIS stop</b><br>'+(dest||'')+'<br><small style="color:#aaa">Predicted route — vessel\\'s reported destination</small>');
+      }
       // Extend map bounds to include vessel
       var bounds = latlngs.length > 0 ? L.latLngBounds(latlngs) : L.latLngBounds([[lat,lng],[lat,lng]]);
       bounds.extend([lat, lng]);
@@ -2542,12 +2626,12 @@ TRACKER_PAGE = BASE + """
       // an orange dashed line: current pos → detour port.
       // Visually communicates "ship is doing this extra stop before continuing."
       // NOTE: only draw this straight-line detour indicator when we do NOT
-      // already have a real route line above — if we have the real geometry,
-      // the AIS destination is already represented as the end of that path,
-      // so a second straight-line marker would be redundant/conflicting.
+      // already have real route geometry (sailed OR remaining) — if we have
+      // either, the AIS destination is already represented properly, so a
+      // straight-line fallback would be redundant/conflicting.
       if(window.vesselDetourLine){ map.removeLayer(window.vesselDetourLine); window.vesselDetourLine = null; }
       if(window.vesselDetourMarker){ map.removeLayer(window.vesselDetourMarker); window.vesselDetourMarker = null; }
-      if(dest && typeof resolvePort === 'function' && !isStale && !window.vesselRealRouteLine){
+      if(dest && typeof resolvePort === 'function' && !isStale && !window.vesselRealRouteLine && !window.vesselRemainingRouteLine){
         var dCoords = resolvePort(dest);
         if(dCoords){
           // Check it's off-route
@@ -3123,7 +3207,7 @@ TRACKER_PAGE = BASE + """
                   var t = new Date(d.updated.replace(' ','T')+'Z');
                   if(!isNaN(t)) ageMin = Math.floor((Date.now()-t.getTime())/60000);
                 }
-                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin,d.verified,d.route_geojson,d.route_km,d.route_passage);
+                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin,d.verified,d.route_geojson,d.route_km,d.route_passage,d.route_remaining_geojson);
               } else if(d.error || !d.mmsi){
                 // Detection failed — no European-bound PCC matched.
                 // Show the carrier-unknown prompt so user can correct the date or enter MMSI.
@@ -3149,7 +3233,7 @@ TRACKER_PAGE = BASE + """
                   var t = new Date(d.updated.replace(' ','T')+'Z');
                   if(!isNaN(t)) ageMin = Math.floor((Date.now()-t.getTime())/60000);
                 }
-                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin,null,d.route_geojson,d.route_km,d.route_passage);
+                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin,null,d.route_geojson,d.route_km,d.route_passage,d.route_remaining_geojson);
               }
             })
             .catch(()=>{ if(skel2) skel2.style.display='none'; });
@@ -3711,14 +3795,20 @@ def api_vessel(mmsi):
 def enrich_with_route(db, resp, order_hash, leg):
     """
     Given a vessel response dict (must have lat/lon and optionally mmsi),
-    add route_geojson/route_km/route_passage fields describing the REAL
-    sea route from Toyota City to the vessel's current position, if we can
-    determine which passage (Cape vs Suez) it actually took.
+    add route fields describing the REAL sea route, split into two parts:
+
+      - route_geojson / route_km: Toyota City -> vessel's current position
+        (the leg already sailed), if we can determine which passage
+        (Cape vs Suez) it actually took.
+      - route_remaining_geojson / route_remaining_km: vessel's current
+        position -> its AIS-reported destination (e.g. Derince), using the
+        SAME locked passage so the two legs are visually continuous and
+        don't disagree about which way the ship is going.
 
     If the passage is still ambiguous (vessel deep in open ocean, hasn't
-    reached either decision zone yet), route_geojson is left out entirely —
-    the frontend falls back to its existing straight-line estimate rather
-    than rendering a guessed shape.
+    reached either decision zone yet), both are left out entirely — the
+    frontend falls back to its existing straight-line estimate rather than
+    rendering a guessed shape.
     """
     lat, lon = resp.get("lat"), resp.get("lon")
     if lat is None or lon is None:
@@ -3727,11 +3817,27 @@ def enrich_with_route(db, resp, order_hash, leg):
         passage = get_locked_passage(db, order_hash, leg, resp.get("mmsi"), float(lat), float(lon))
         if not passage:
             return resp  # ambiguous — let frontend use its straight-line fallback
+
         coords, total_km = get_real_route(db, TOYOTA_CITY_LATLON, (float(lat), float(lon)), passage)
         if coords:
             resp["route_geojson"] = coords  # [[lon,lat], ...] from Toyota City to current position
             resp["route_km"] = total_km
             resp["route_passage"] = passage
+
+        # Remaining leg: current position -> AIS-reported destination port.
+        # Only drawn if we can resolve the destination text to coordinates
+        # AND those coordinates are far enough from current position to be
+        # worth drawing (avoids a near-zero-length line when the ship is
+        # essentially already at the reported destination).
+        dest_text = resp.get("destination")
+        dest_coords = resolve_port_py(dest_text) if dest_text else None
+        if dest_coords:
+            remaining_coords, remaining_km = get_real_route(
+                db, (float(lat), float(lon)), dest_coords, passage
+            )
+            if remaining_coords and (remaining_km or 0) > 20:  # skip near-zero legs
+                resp["route_remaining_geojson"] = remaining_coords
+                resp["route_remaining_km"] = remaining_km
     except Exception as e:
         print(f"[enrich_with_route] failed for order={order_hash[:10]}: {e}", file=sys.stderr)
     return resp
