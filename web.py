@@ -92,6 +92,114 @@ TOYOTA_CITY_LATLON = (35.18, 136.91)
 # pinning a known waypoint forces the geometry we actually want.
 CAPE_OF_GOOD_HOPE_LATLON = (-34.8, 20.0)
 
+# searoute's underlying maritime network is too coarse near several narrow
+# straits/peninsulas — it has so few nodes there that a "shortest path"
+# through that area is a straight line (sometimes made of several short
+# segments) that cuts straight across the land mass instead of following
+# the water route around/through it (observed for real: Dardanelles,
+# Corinth isthmus). Rather than hardcoding a special leg for every strait
+# inside get_real_route's Cape/Suez branches, we post-process ANY computed
+# route: any point landing inside one of these known TIGHT exclusion zones
+# (the actual isthmus/peninsula land mass — not the surrounding open sea)
+# gets removed and replaced with a single hop through the correct waypoint.
+#
+# IMPORTANT: exclusion_box must be drawn tightly around the actual land
+# crossing, not the general surrounding region. An earlier version used a
+# loose "general vicinity" box (most of southern Greece) which incorrectly
+# matched every point of an unrelated short test route and collapsed the
+# entire path to a single point. The box should only contain points that
+# are themselves the bug (i.e., literally on/over the land mass), never
+# legitimate open-water route points nearby.
+KNOWN_CHOKE_WAYPOINTS = [
+    # label, wp_lat, wp_lon, exclusion_box(lat_min, lat_max, lon_min, lon_max)
+    ("cape_matapan",    36.38,  22.45, (37.85, 38.40, 21.80, 23.10)),  # Corinth isthmus land mass — points here get replaced with a single hop via Cape Matapan (south tip of the Peloponnese), forcing the route around Greece instead of across the isthmus
+    ("dardanelles_mid", 40.15,  26.40, (39.90, 40.70, 26.00, 27.00)),  # Gallipoli peninsula tip — points here get replaced with the mid-channel Dardanelles waypoint
+    ("bosphorus_mid",   41.05,  29.02, (40.80, 41.30, 28.70, 29.30)),  # Bosphorus narrows — for Black Sea-bound routes
+    ("gibraltar_mid",   35.95,  -5.55, (35.70, 36.20, -5.90, -5.20)),  # Strait of Gibraltar narrows
+    ("messina_mid",     38.23,  15.60, (38.00, 38.45, 15.40, 15.80)),  # Strait of Messina narrows, Sicily/mainland Italy
+]
+
+
+def _haversine_km(a, b):
+    """a, b are (lat, lon) tuples."""
+    import math
+    R = 6371
+    dlat = math.radians(b[0]-a[0])
+    dlon = math.radians(b[1]-a[1])
+    x = math.sin(dlat/2)**2 + math.cos(math.radians(a[0]))*math.cos(math.radians(b[0]))*math.sin(dlon/2)**2
+    return 2*R*math.asin(math.sqrt(x))
+
+
+def fix_choke_point_segments(coords):
+    """
+    Given a list of [lon, lat] route coordinates, detect any point(s)
+    landing inside a known choke-point's TIGHT exclusion box (the actual
+    isthmus/peninsula land mass — see KNOWN_CHOKE_WAYPOINTS) and replace
+    that whole contiguous run of such points with a single clean hop
+    through the corresponding known-good waypoint.
+
+    This is a geometric patch on TOP of whatever searoute returned — it
+    doesn't re-run pathfinding. It exists because searoute's network is
+    too sparse near several narrow straits/peninsulas (observed for real:
+    Dardanelles, Corinth isthmus), so the "shortest path" there ends up
+    tracing across land — sometimes via several consecutive short-ish
+    points, not just one long segment — instead of following the water
+    route around/through it.
+
+    The exclusion boxes are deliberately tight (just the land crossing
+    itself), not a broad "general vicinity" box — an earlier version used
+    a loose region box which incorrectly matched legitimate open-water
+    points far from the actual problem and could collapse an entire
+    unrelated route down to a single point.
+    """
+    if not coords or len(coords) < 2:
+        return coords
+
+    # Any point landing inside the TIGHT exclusion box of a known choke
+    # point is suspect by definition — legitimate open-water routes for
+    # these region-pairs should pass AROUND via the pinned waypoint, not
+    # literally through the isthmus/peninsula land mass.
+    # AROUND the box via the pinned waypoint, not through it).
+    def point_in_any_choke_box(lat, lon):
+        for label, wp_lat, wp_lon, bbox in KNOWN_CHOKE_WAYPOINTS:
+            lat_min, lat_max, lon_min, lon_max = bbox
+            if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
+                return (wp_lat, wp_lon)
+        return None
+
+    result = []
+    i = 0
+    n = len(coords)
+    while i < n:
+        lon, lat = coords[i]
+        wp = point_in_any_choke_box(lat, lon)
+        if wp is None:
+            result.append(coords[i])
+            i += 1
+            continue
+
+        # Found the start of a run inside a choke box. Extend forward
+        # while points remain inside (a "run" rather than a single point,
+        # since the original network may have placed 1-3 sparse nodes
+        # right in the danger zone, as seen with Corinth's isthmus cut).
+        run_wp = wp
+        j = i
+        while j < n:
+            lon_j, lat_j = coords[j]
+            if point_in_any_choke_box(lat_j, lon_j) == run_wp:
+                j += 1
+            else:
+                break
+        # Replace the whole run [i, j) with a single point at the
+        # waypoint — the route now goes straight-line-in, through the
+        # waypoint, straight-line-out, which correctly bends around/through
+        # the real channel instead of tracing across land.
+        result.append([run_wp[1], run_wp[0]])  # [lon, lat]
+        i = j
+
+    return result
+
+
 # Mirrors the client-side PORT_COORDS table (see resolvePort() in the page
 # template) so the BACKEND can also resolve an AIS destination string like
 # "DERINCE" into coordinates — needed to compute the real remaining-leg
@@ -199,7 +307,7 @@ def infer_route_passage(lat, lon, prev_lat=None, prev_lon=None):
 # orphaned rather than being served forever — this is what caught us out
 # when a real routing bugfix didn't show up on the map because the OLD,
 # buggy geometry was still sitting in route_cache under the same key.
-ROUTE_CACHE_VERSION = 2  # v2: fixed cape-branch leg2 backtracking through Suez
+ROUTE_CACHE_VERSION = 5  # v5: rewrote choke-point fix as tight-exclusion-box point removal (run-based) instead of broad-bbox perpendicular-distance matching, which had been either missing Corinth entirely or over-collapsing unrelated routes
 
 def _route_cache_key(o_lat, o_lon, d_lat, d_lon, passage):
     """Round coords so minor AIS jitter still hits the cache."""
@@ -272,6 +380,12 @@ def get_real_route(db, origin, dest, passage):
     # searoute occasionally returns unwrapped coords for paths that cross
     # the antimeridian.
     norm_coords = [[((lon + 180) % 360) - 180, lat] for lon, lat in coords]
+
+    # Patch any suspiciously long segments near known narrow straits/
+    # peninsulas (Dardanelles, Corinth, Gibraltar, Bosphorus, Messina) where
+    # searoute's network is too sparse and would otherwise draw a straight
+    # line cutting across land. See fix_choke_point_segments() docstring.
+    norm_coords = fix_choke_point_segments(norm_coords)
 
     try:
         db.execute(
