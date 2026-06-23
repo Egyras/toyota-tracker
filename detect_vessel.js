@@ -106,7 +106,7 @@ var VESSEL_IMO = {
   "636022333":"9580907",  // Wild Rose Leader
   "308688000":"9388569",  // Emerald Leader
   "309905000":"9604936",  // Garnet Leader 2
-  "432716000":"9409340",  // Bishu Highway  ← YOUR SHIP confirmed E5 May 27
+  "432716000":"9409340",  // Bishu Highway
   "431323000":"9409352",  // Cepheus Leader
   "432988000":"9342882",  // Libra Leader
   "431946000":"9342918",  // Leo Leader

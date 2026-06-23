@@ -355,29 +355,6 @@ def get_db():
                 cached_at TEXT DEFAULT (datetime('now'))
             )
         """)
-        # Real sea-route cache (searoute results are expensive to recompute —
-        # cache by rounded origin/dest coords + passage choice). Also stores,
-        # per order+leg, the last *inferred* passage (cape/suez) so a vessel
-        # near the ambiguous decision zone doesn't flip-flop on AIS jitter.
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS route_cache (
-                cache_key   TEXT PRIMARY KEY,
-                passage     TEXT NOT NULL,
-                route_json  TEXT NOT NULL,
-                route_km    REAL,
-                cached_at   TEXT DEFAULT (datetime('now'))
-            )
-        """)
-        db.execute("""
-            CREATE TABLE IF NOT EXISTS route_passage_locked (
-                order_hash  TEXT NOT NULL,
-                leg         TEXT NOT NULL,
-                mmsi        TEXT,
-                passage     TEXT NOT NULL,
-                locked_at   TEXT DEFAULT (datetime('now')),
-                UNIQUE(order_hash, leg)
-            )
-        """)
         db.commit()
         g.db = db
     return g.db
@@ -2333,9 +2310,7 @@ TRACKER_PAGE = BASE + """
       // may not work" right below it, which is contradictory. Hide it here.
       var mstWarning = document.getElementById('mst-limit-warning');
       if (mstWarning) mstWarning.style.display = 'none';
-      // Stash for renderVoyageProgress to use for day-based progress % —
-      // see that function for why we dropped route-geometry-based progress
-      // (searoute/Cape-Suez/choke-point patching) in favor of this.
+      // Stash departure date for renderVoyageProgress (day-based progress %).
       window.currentDepartDate = departDate || null;
       if (vesselMarker) map.removeLayer(vesselMarker);
       if (vesselPulse) map.removeLayer(vesselPulse);
@@ -2375,14 +2350,6 @@ TRACKER_PAGE = BASE + """
           (eta?'ETA: '+eta+'<br>':'')+
           '<small style="color:#aaa">MMSI: '+mmsi+'</small>'
         );
-      // NOTE: we deliberately do NOT draw any route line (sailed, remaining,
-      // or detour) on the map anymore. Earlier versions tried to show the
-      // real sailed path / predicted remaining path using searoute-computed
-      // geometry, with manual fixes for narrow straits where that network's
-      // data was too sparse (Dardanelles, Corinth, etc). That approach kept
-      // surfacing new edge cases and didn't actually tell the person
-      // anything more useful than the AIS-reported ETA already shown below
-      // ("Next stop in Xd Yh") — so it's gone. Just the ship marker + pulse.
       // Extend map bounds to include vessel
       var bounds = latlngs.length > 0 ? L.latLngBounds(latlngs) : L.latLngBounds([[lat,lng],[lat,lng]]);
       bounds.extend([lat, lng]);
@@ -2735,17 +2702,8 @@ TRACKER_PAGE = BASE + """
       if(nearestHubKm > 500){
         fromEl.textContent = 'Toyota City';
         toEl.textContent = destText ? destText.split(',')[0] : 'Europe';
-        // Day-based progress: elapsed days since departure / total days
-        // until the AIS-reported ETA at the next stop. No route geometry
-        // involved — just two real dates: when the ship actually left
-        // (observed leftTheFactory date, or a user-entered/saved override)
-        // and when the ship itself says it'll arrive (AIS ETA broadcast).
-        // This replaced an earlier searoute-based distance calculation
-        // that required guessing which passage (Cape vs Suez) the vessel
-        // took and patching individual narrow straits where that approach
-        // produced nonsense (Dardanelles, Corinth, etc) — all of that
-        // complexity is gone, and the resulting % is no less accurate,
-        // since both departure and ETA are real, not estimated, values.
+        // Day-based progress: elapsed / total days (departure → AIS ETA).
+        // Both values are real observations, not geometry-based estimates.
         var deepSeaPct = null;
         var departDateStr = window.currentDepartDate;
         if(departDateStr && eta){
@@ -3537,21 +3495,7 @@ def get_depart_date_for_order(db, order_hash, leg):
 def enrich_with_route(db, resp, order_hash, leg):
     """
     Attach depart_date to the vessel response so the frontend can compute
-    voyage progress as a simple day-based ratio:
-
-        elapsed_days = today - depart_date
-        total_days   = ais_eta - depart_date
-        pct = elapsed_days / total_days
-
-    This deliberately does NOT compute or attach any route geometry
-    (no searoute, no Cape/Suez passage inference, no choke-point patching).
-    That approach turned out to be a poor fit: every narrow strait/
-    peninsula needed its own manual fix, the predicted "remaining leg" was
-    pure guesswork, and the resulting line didn't actually tell the person
-    anything they couldn't get more reliably from the AIS ETA they already
-    see in the "Next stop in Xd Yh" banner. Time-based progress uses only
-    numbers the ship itself broadcasts (ETA) or that are directly observed
-    (departure date) — no geometry to get wrong.
+    voyage progress as a day-based ratio: elapsed / total days (departure → AIS ETA).
     """
     resp["depart_date"] = get_depart_date_for_order(db, order_hash, leg)
     return resp
