@@ -2083,7 +2083,15 @@ TRACKER_PAGE = BASE + """
       </div>
     </div>
 
-    <!-- MST history limit warning — shown when leftTheFactory date is >25 days ago -->
+    <!-- MST history limit warning — only shown from the detection-FAILURE
+         branch below (see fetch('/api/vessel-detect...').then(...) else-if),
+         never eagerly on page load. Previously this script unconditionally
+         set display:block based purely on days-since-factory > 20, with no
+         check for whether detection actually succeeded — so a confirmed,
+         live, berth-verified vessel would still show "detection may not
+         work" right next to it, which is contradictory and confusing. Now
+         we only compute/stash the day count here; actual visibility is
+         decided where we know the real outcome. -->
     {% set lf_date = order._step_dates.leftTheFactory.current if order._step_dates and order._step_dates.leftTheFactory else '' %}
     {% if lf_date %}
     <div id="mst-limit-warning" style="display:none;margin-bottom:1.25rem;padding:10px 12px;
@@ -2106,9 +2114,10 @@ TRACKER_PAGE = BASE + """
       if(!lf) return;
       var days = Math.floor((Date.now() - new Date(lf).getTime()) / 86400000);
       document.getElementById('days-since-factory').textContent = days;
-      if(days > 20) {
-        document.getElementById('mst-limit-warning').style.display = 'block';
-      }
+      // Stash for the detection-failure branch to consult — it decides
+      // whether to actually show this warning, only once we know
+      // detection genuinely failed (not just based on day count alone).
+      window.daysSinceFactoryDeparture = days;
     })();
     </script>
     {% endif %}
@@ -2316,6 +2325,14 @@ TRACKER_PAGE = BASE + """
       // a PCC pattern but MMSI is unknown (possibly new Toyota charter we haven't catalogued).
       // Default true if not passed (backward compat with direct calls).
       if (verified == null) verified = true;
+      // loadVessel only runs when detection actually succeeded (we have a
+      // real mmsi/position to show). The "vessel detection may not work"
+      // warning further down the page is a pure days-since-departure
+      // heuristic with no knowledge of whether detection succeeded — so
+      // without this, a confirmed live vessel would still show "detection
+      // may not work" right below it, which is contradictory. Hide it here.
+      var mstWarning = document.getElementById('mst-limit-warning');
+      if (mstWarning) mstWarning.style.display = 'none';
       // Stash for renderVoyageProgress to use for day-based progress % —
       // see that function for why we dropped route-geometry-based progress
       // (searoute/Cape-Suez/choke-point patching) in favor of this.
@@ -2896,10 +2913,20 @@ TRACKER_PAGE = BASE + """
                 }
                 loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin,d.verified,d.depart_date);
               } else if(d.error || !d.mmsi){
-                // Detection failed — no European-bound PCC matched.
+                // Detection genuinely failed — no European-bound PCC matched.
                 // Show the carrier-unknown prompt so user can correct the date or enter MMSI.
                 var prompt = document.getElementById('vessel-date-prompt');
                 if(prompt) prompt.style.display = 'block';
+                // Only ALSO show the "records expire after ~20 days" explanation
+                // if that's actually a plausible reason for the failure — i.e.
+                // we're past that window. This only ever runs on the FAILURE
+                // path now, never just because the order happens to be old
+                // (a successful, live detection hides/skips this entirely —
+                // see loadVessel()).
+                if((window.daysSinceFactoryDeparture||0) > 20){
+                  var mstW = document.getElementById('mst-limit-warning');
+                  if(mstW) mstW.style.display = 'block';
+                }
               }
             })
             .catch(()=>{ if(skel) skel.style.display='none'; });
