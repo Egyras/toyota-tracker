@@ -2446,6 +2446,17 @@ TRACKER_PAGE = BASE + """
       'BE ZEE':       [51.320,   3.215],
       'DE BRV':       [53.580,   8.580],  // Bremerhaven LOCODE
       'NL RTM':       [51.970,   4.150],  // Rotterdam LOCODE
+      // Portbury (Bristol, UK) — K-Line uses GBBRL as AIS destination
+      // for this port rather than "SOUTHAMPTON" or "PORTBURY"
+      'PORTBURY':     [51.494,  -2.720],
+      'GB BRL':       [51.494,  -2.720],
+      'GBBRL':        [51.494,  -2.720],
+      // Piraeus LOCODE — ship broadcast GRPIR after departing Derince
+      'GRPIR':        [37.940,  23.640],
+      'GR PIR':       [37.940,  23.640],
+      // Derince extra LOCODEs seen in AIS broadcasts
+      'TRDRC':        [40.760,  29.834],
+      'TR DRC':       [40.760,  29.834],
     };
 
     function resolvePort(destText){
