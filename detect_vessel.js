@@ -82,7 +82,8 @@ var TOYOTA_CARRIERS={
   "431323000":"Cepheus Leader",
   "432988000":"Libra Leader",
   "431946000":"Leo Leader",
-  "477816600":"Danube Highway",
+  "477816600":"Danube Highway",   // K-Line EUR feeder, IMO 9388595
+  "308803000":"Danube Highway",   // K-Line EUR feeder, IMO 9316309 (confirmed Zeebrugge Jul 17 → Malmö → Paldiski circuit)
   "636022937":"Orchid Leader",
 };
 
@@ -111,7 +112,8 @@ var VESSEL_IMO = {
   "431323000":"9409352",  // Cepheus Leader
   "432988000":"9342882",  // Libra Leader
   "431946000":"9342918",  // Leo Leader
-  "477816600":"9388595",  // Danube Highway
+  "477816600":"9388595",  // Danube Highway (K-Line EUR)
+  "308803000":"9316309",  // Danube Highway (K-Line EUR) — confirmed Zeebrugge Jul 17 → Malmö → Paldiski
   "636022937":"9985411",  // Orchid Leader (NYK/K-Line 2025) — confirmed for LT-1 May 27 Nagoya departure via Suez, arrived Zeebrugge Jul 17
 };
 

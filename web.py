@@ -3725,10 +3725,54 @@ def api_vessel_detect(order_hash):
         if row:
             left_factory_date = row["date_entered"]
         elif leg_override != 'nagoya':
-            # For hub legs (sagunto/zeebrugge/malmo) use today as departure date
-            # since the car just arrived at this hub
-            from datetime import datetime
-            left_factory_date = datetime.utcnow().strftime("%Y-%m-%d")
+            # For feeder legs (zeebrugge/malmo/etc.) we need the date the car
+            # left that specific hub — NOT today's date (which would make the
+            # scraper search the wrong departure window).
+            # Best source: the timestamp of the first check where that hub's
+            # delivery step appeared as 'visited' or 'current' in deliveries_json.
+            # This is the earliest date we know the car was at this hub.
+            hub_map = {
+                'zeebrugge': ['ZEEBRUGGE', 'ZEEBRUGG'],
+                'malmo':     ['MALMO', 'MALMÖ', 'MALMOE'],
+                'sagunto':   ['SAGUNTO'],
+                'livorno':   ['LIVORNO'],
+                'portbury':  ['PORTBURY', 'BRISTOL'],
+                'southampton': ['SOUTHAMPTON'],
+                'drammen':   ['DRAMMEN'],
+                'piraeus':   ['PIRAEUS'],
+            }
+            hub_names = hub_map.get(leg_override, [])
+            hub_date = None
+            if hub_names:
+                # Look through checks for the first time this hub appeared visited
+                checks = db.execute("""
+                    SELECT ts, deliveries_json FROM checks
+                    WHERE order_hash=? AND deliveries_json IS NOT NULL
+                    ORDER BY ts ASC
+                """, (order_hash,)).fetchall()
+                for check in checks:
+                    try:
+                        delivs = json.loads(check["deliveries_json"])
+                        for d in (delivs if isinstance(delivs, list) else []):
+                            loc = (d.get("loc") or d.get("locationName") or "").upper()
+                            visited = d.get("isVisited", "")
+                            if any(h in loc for h in hub_names) and visited in ('visited', 'current', 'inTransit'):
+                                hub_date = check["ts"][:10]  # YYYY-MM-DD
+                                break
+                    except Exception:
+                        pass
+                    if hub_date:
+                        break
+            if hub_date:
+                left_factory_date = hub_date
+            else:
+                # True last resort: use today. This will likely produce a wrong
+                # detection window — user should enter the date manually.
+                from datetime import datetime
+                left_factory_date = datetime.utcnow().strftime("%Y-%m-%d")
+                print(f"[api_vessel_detect] WARNING: no hub date found for leg={leg_override}, "
+                      f"order={order_hash[:10]} — using today as fallback, detection may be inaccurate",
+                      file=sys.stderr)
         else:
             return jsonify(error="no leftTheFactory date"), 404
 
@@ -3779,6 +3823,36 @@ def api_vessel_detect(order_hash):
         return jsonify(error="no vessel detected"), 404
 
     # Save detection result to vessel_overrides
+    # For feeder legs, the depart_date saved here becomes the search anchor for
+    # the NEXT leg's detection. We add typical transit time between hubs so that
+    # the next leg's D-6 to D-1 window correctly covers when the vessel actually
+    # arrives at the next port. Without this, the Malmö leg would search Jul 14-19
+    # when D=Jul 20 (Zeebrugge observed date), but Danube Highway arrives Malmö
+    # Jul 20 and departs Jul 21-22 — outside that window.
+    # Typical transit times between consecutive hubs (conservative, in days):
+    NEXT_HUB_TRANSIT_DAYS = {
+        'nagoya':      0,   # depart_date is actual departure, no offset needed
+        'zeebrugge':   2,   # Zeebrugge → Malmö ~2 days
+        'malmo':       2,   # Malmö → Paldiski ~2 days
+        'bremerhaven': 2,   # Bremerhaven → next hub ~2 days
+        'portbury':    2,   # Portbury → Zeebrugge ~2 days
+        'southampton': 2,
+        'sagunto':     3,   # Sagunto → further Med ports
+        'livorno':     2,
+        'drammen':     1,
+        'piraeus':     1,
+    }
+    transit_offset = NEXT_HUB_TRANSIT_DAYS.get(leg_override, 0)
+    if transit_offset > 0:
+        from datetime import datetime, timedelta
+        try:
+            base = datetime.strptime(left_factory_date, "%Y-%m-%d")
+            save_depart_date = (base + timedelta(days=transit_offset)).strftime("%Y-%m-%d")
+        except Exception:
+            save_depart_date = left_factory_date
+    else:
+        save_depart_date = left_factory_date
+
     bv = 1 if vessel.get('berth_verified') else 0
     db.execute("""
         INSERT INTO vessel_overrides (order_hash, leg, depart_date, detected_mmsi, detected_name, detected_at, source, berth_verified)
@@ -3793,7 +3867,7 @@ def api_vessel_detect(order_hash):
                     THEN MAX(vessel_overrides.berth_verified, excluded.berth_verified)
                 ELSE excluded.berth_verified
             END
-    """, (order_hash, leg_override, left_factory_date,
+    """, (order_hash, leg_override, save_depart_date,
           vessel.get('mmsi'), vessel.get('name'), bv))
 
     _cache_vessel(db, order_hash, vessel, leg=leg_override)
