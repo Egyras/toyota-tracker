@@ -83,6 +83,7 @@ var TOYOTA_CARRIERS={
   "432988000":"Libra Leader",
   "431946000":"Leo Leader",
   "477816600":"Danube Highway",
+  "636022937":"Orchid Leader",
 };
 
 // IMO lookup for berth verification — MMSI -> IMO
@@ -111,6 +112,7 @@ var VESSEL_IMO = {
   "432988000":"9342882",  // Libra Leader
   "431946000":"9342918",  // Leo Leader
   "477816600":"9388595",  // Danube Highway
+  "636022937":"9985411",  // Orchid Leader (NYK/K-Line 2025) — confirmed for LT-1 May 27 Nagoya departure via Suez, arrived Zeebrugge Jul 17
 };
 
 // Map delivery location names to detection leg
