@@ -2292,7 +2292,19 @@ TRACKER_PAGE = BASE + """
     // Stop tracking once car left port depot (now on truck to dealer)
     {% set show_vessel = order.currentStatus.currentStatus in ['LeftTheFactory','leftTheFactory','InTransit','inTransit'] or order._vessel_mmsi %}
     {% if order.currentStatus.currentStatus in ['LeftTheDepot','leftTheDepot','ArrivedAtRetailer','arrivedAtRetailer','ArrivedInDestination','arrivedInDestination'] %}
-      {% set show_vessel = false %}
+      {# Hide vessel for final states UNLESS there are still unvisited vessel hubs ahead.
+         LeftTheDepot at an intermediate hub (e.g. Zeebrugge) means the car is on a feeder
+         vessel heading to the next hub (Malmö) — vessel tracking should still show.
+         Only hide when ALL hubs are visited or the car is at the dealer. #}
+      {% set has_unvisited_hub = namespace(value=false) %}
+      {% for d in (order.intermediateDeliveries or []) %}
+        {% if d.isVisited in ['notVisited', 'inTransit'] and d.destinationType in ['HUB','TRANSIT'] %}
+          {% set has_unvisited_hub.value = true %}
+        {% endif %}
+      {% endfor %}
+      {% if not has_unvisited_hub.value %}
+        {% set show_vessel = false %}
+      {% endif %}
     {% endif %}
     {% if show_vessel %}
     var vesselMarker = null;
@@ -2446,17 +2458,6 @@ TRACKER_PAGE = BASE + """
       'BE ZEE':       [51.320,   3.215],
       'DE BRV':       [53.580,   8.580],  // Bremerhaven LOCODE
       'NL RTM':       [51.970,   4.150],  // Rotterdam LOCODE
-      // Portbury (Bristol, UK) — K-Line uses GBBRL as AIS destination
-      // for this port rather than "SOUTHAMPTON" or "PORTBURY"
-      'PORTBURY':     [51.494,  -2.720],
-      'GB BRL':       [51.494,  -2.720],
-      'GBBRL':        [51.494,  -2.720],
-      // Piraeus LOCODE — ship broadcast GRPIR after departing Derince
-      'GRPIR':        [37.940,  23.640],
-      'GR PIR':       [37.940,  23.640],
-      // Derince extra LOCODEs seen in AIS broadcasts
-      'TRDRC':        [40.760,  29.834],
-      'TR DRC':       [40.760,  29.834],
     };
 
     function resolvePort(destText){
@@ -2820,9 +2821,16 @@ TRACKER_PAGE = BASE + """
       .then(r=>r.json())
       .then(function(overrides){
         var leg = 'nagoya';
+        {% set prev_visited = namespace(loc='', is_vessel=false) %}
         {% for d in delivs %}
+        {% set loc = d.locationName | lower %}
+        {% set is_vessel_hub = d.destinationType in ['HUB','TRANSIT'] and
+            ('zeebrugge' in loc or 'malmo' in loc or 'malmö' in loc or
+             'sagunto' in loc or 'livorno' in loc or 'bristol' in loc or
+             'portbury' in loc or 'southampton' in loc or 'drammen' in loc or
+             'piraeus' in loc) %}
         {% if d.isVisited == 'inTransit' %}
-          {% set loc = d.locationName | lower %}
+          {# Hub currently inTransit — use it directly #}
           {% if 'zeebrugge' in loc %}leg = 'zeebrugge';
           {% elif 'malmo' in loc or 'malmö' in loc %}leg = 'malmo';
           {% elif 'sagunto' in loc %}leg = 'sagunto';
@@ -2832,6 +2840,28 @@ TRACKER_PAGE = BASE + """
           {% elif 'drammen' in loc %}leg = 'drammen';
           {% elif 'piraeus' in loc %}leg = 'piraeus';
           {% endif %}
+        {% elif d.isVisited == 'visited' and is_vessel_hub %}
+          {# This hub was visited — remember it; the NEXT hub's state determines
+             whether the car is currently en route to it on a feeder vessel #}
+          {% set prev_visited.loc = loc %}
+          {% set prev_visited.is_vessel = true %}
+        {% elif d.isVisited == 'notVisited' and prev_visited.is_vessel %}
+          {# Previous hub was visited, this one is not yet — car is on a feeder
+             vessel between the previous hub and this one. Use the previous hub's
+             leg so we scrape departures from that hub's port. #}
+          {% set ploc = prev_visited.loc %}
+          {% if 'zeebrugge' in ploc %}leg = 'zeebrugge';
+          {% elif 'malmo' in ploc or 'malmö' in ploc %}leg = 'malmo';
+          {% elif 'sagunto' in ploc %}leg = 'sagunto';
+          {% elif 'livorno' in ploc %}leg = 'livorno';
+          {% elif 'bristol' in ploc or 'portbury' in ploc %}leg = 'portbury';
+          {% elif 'southampton' in ploc %}leg = 'southampton';
+          {% elif 'drammen' in ploc %}leg = 'drammen';
+          {% elif 'piraeus' in ploc %}leg = 'piraeus';
+          {% endif %}
+          {% set prev_visited.is_vessel = false %}{# only fire once #}
+        {% else %}
+          {% set prev_visited.is_vessel = false %}
         {% endif %}
         {% endfor %}
 
