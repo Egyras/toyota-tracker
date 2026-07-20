@@ -694,8 +694,16 @@ if(MMSI){
 
         // TEMPORAL SANITY CHECK — vessel can't be carrying a car loaded AFTER
         // the vessel already arrived at the destination on its current rotation.
-        // If the ship was at ZCT (Zeebrugge) or another EU port within ~30 days
-        // BEFORE the order's leftTheFactory date, the car can't be on this ship.
+        // For NAGOYA leg only: if the ship was already at a European port
+        // before the car's leftTheFactory date, the car can't be on this ship
+        // (it left Europe before the car was even ready).
+        // This check does NOT apply to zeebrugge/malmo feeder legs — for those,
+        // being at ZCT before the LeftTheDepot date is exactly expected: the
+        // feeder vessel arrived at Zeebrugge, loaded the car, then departed.
+        // Applying this check to feeder legs incorrectly hard-rejects every
+        // valid candidate (confirmed: Danube Highway and Celeste ACE both
+        // correctly rejected as false positives when this ran on zeebrugge leg).
+        if(LEG === 'nagoya'){
         try {
           var depMs = new Date(D+"T00:00:00Z").getTime();
           var trackUrl = 'https://shipinfo.net/topos/api/vessel/track?days=60&imo='+
@@ -734,6 +742,7 @@ if(MMSI){
             m.europeScore -= 50;
           }
         } catch(e){ process.stderr.write("Temporal check failed for "+m.vessel+": "+e.message+"\n"); }
+        } // end nagoya-only block
 
         process.stderr.write(m.vessel+": europeScore="+m.europeScore+"\n");
       }catch(e){ m.europeScore=0; }
