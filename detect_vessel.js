@@ -145,15 +145,23 @@ var MALMO_LAT_MIN = 55.610, MALMO_LAT_MAX = 55.630;
 var MALMO_LON_MIN = 12.990, MALMO_LON_MAX = 13.015;
 
 // Known Nagoya Toyota berths — confirmed from AIS data May 2026
+// NOTE: "europe" flag means EXCLUSIVELY Europe-bound. Mixed-use berths
+// that can serve either Europe or other routes use europe:null.
+// The berth check alone cannot confirm Europe routing for mixed berths —
+// that requires the TOYOTA_CARRIERS list or route scoring to confirm.
 var NAGOYA_BERTHS = [
-  // E5 — Toyota EUROPE loading berth (confirmed: Bishu Highway, Equuleus Leader, Undine Highway etc.)
+  // E5 — primary Toyota EUROPE loading berth (confirmed: Bishu Highway,
+  //   Equuleus Leader, Undine Highway etc.)
   { name:'E5', europe:true,
     latMin:35.048, latMax:35.062, lonMin:136.875, lonMax:136.892 },
-  // W5 — Non-Europe routes (confirmed: Dionysos Leader → Americas)
-  { name:'W5', europe:false,
+  // W5 — western pier, MIXED use (confirmed: Orchid Leader briefly May 29
+  //   before Europe voyage; also used for other routes)
+  { name:'W5', europe:null,
     latMin:35.048, latMax:35.062, lonMin:136.848, lonMax:136.862 },
-  // Kinjo South — different terminal entirely (Orchid Leader → China)
-  { name:'KINJO', europe:false,
+  // KINJO South / D berth — MIXED use (confirmed: Orchid Leader main load
+  //   May 28-29 for Europe voyage; also serves China/domestic routes.
+  //   Orchid Leader is 200×38m — wider than most PCCs — may not fit at E5)
+  { name:'KINJO', europe:null,
     latMin:35.025, latMax:35.040, lonMin:136.788, lonMax:136.808 },
 ];
 
@@ -748,13 +756,29 @@ if(MMSI){
           vm.europeScore += 15;
           vm.berthConfirmed = true;
         } else if(berthOk === false){
-          // At Nagoya but wrong berth OR not at Nagoya at all
-          process.stderr.write(vm.vessel+': NOT at any Nagoya Toyota berth, removing\n');
+          // Not found at ANY known Nagoya Toyota berth — unknown vessel position
+          process.stderr.write(vm.vessel+': NOT at any known Nagoya Toyota berth\n');
           vm.europeScore = -1;
         } else if(typeof berthOk === 'string' && berthOk !== 'E5'){
-          // Named wrong berth (W5, KINJO) — confirmed non-Europe
-          process.stderr.write(vm.vessel+': at '+berthOk+' (non-Europe berth), removing\n');
-          vm.europeScore = -1;
+          // Named berth that is mixed-use (W5, KINJO — europe:null) or
+          // confirmed non-Europe (europe:false).
+          // Look up the berth definition to decide impact.
+          var bDef = NAGOYA_BERTHS.find(function(b){ return b.name === berthOk; });
+          if(bDef && bDef.europe === false){
+            // Confirmed non-Europe only berth — eliminate
+            process.stderr.write(vm.vessel+': at '+berthOk+' (non-Europe berth), removing\n');
+            vm.europeScore = -1;
+          } else {
+            // Mixed-use berth (europe:null) — confirmed at Nagoya Toyota
+            // terminal but berth alone can't prove Europe routing.
+            // Treat as neutral: keep candidate, let other signals decide.
+            // Also mark berthConfirmed so the "require E5" gate doesn't
+            // eliminate it — we've confirmed the ship was physically at
+            // a Toyota Nagoya berth, which is meaningful even if not E5.
+            process.stderr.write(vm.vessel+': at '+berthOk+' (mixed-use berth) — keeping, let route scoring decide\n');
+            vm.europeScore += 5;   // small positive: confirmed at Nagoya Toyota terminal
+            vm.berthConfirmed = true;
+          }
         } else if(berthOk === true){
           // Zeebrugge/Malmo confirmed
           process.stderr.write(vm.vessel+': CONFIRMED at '+LEG+' berth ✅\n');
@@ -801,8 +825,10 @@ if(MMSI){
     var depMs = new Date(D+"T00:00:00Z").getTime();
     var winStart = depMs - 6*86400000;   // D-6 (6 days before email)
     var winEnd   = depMs - 1*86400000;   // D-1 (strictly before email arrival)
-    // E5 berth box (same as NAGOYA_BERTHS[0])
-    var E5_LAT = [35.048, 35.062], E5_LON = [136.875, 136.892];
+    // Check ALL known Toyota Nagoya berths (E5 primary, but also W5/KINJO
+    // which are confirmed mixed-use — Orchid Leader loaded European cars at
+    // KINJO/W5 in May 2026, never touching E5)
+    var NAGOYA_CHECK_BERTHS = NAGOYA_BERTHS; // use the shared berth definitions
 
     var candidates = [];
     var mmsiList = Object.keys(TOYOTA_CARRIERS);
@@ -818,27 +844,38 @@ if(MMSI){
           var resp = await fetch(url);
           var data = await resp.json();
           var pts = Array.isArray(data) ? data : (data.data || data.points || []);
-          // Find E5 stationary points within the departure window
-          var e5Hits = pts.filter(function(p){
-            if(!p.lat || !p.lng) return false;
-            var ts = new Date(p.updated).getTime();
-            return ts >= winStart && ts <= winEnd &&
-                   p.lat >= E5_LAT[0] && p.lat <= E5_LAT[1] &&
-                   p.lng >= E5_LON[0] && p.lng <= E5_LON[1] &&
-                   (p.speed_kn||0) <= 1;
+          // Check ALL Toyota Nagoya berths in the departure window
+          var berthHits = [];
+          var bestBerth = null;
+          NAGOYA_CHECK_BERTHS.forEach(function(b){
+            var hits = pts.filter(function(p){
+              if(!p.lat || !p.lng) return false;
+              var ts = new Date(p.updated).getTime();
+              return ts >= winStart && ts <= winEnd &&
+                     p.lat >= b.latMin && p.lat <= b.latMax &&
+                     p.lng >= b.lonMin && p.lng <= b.lonMax &&
+                     (p.speed_kn||0) <= 1;
+            });
+            if(hits.length > 0 && (!bestBerth || b.europe === true)){
+              berthHits = hits;
+              bestBerth = b;
+            }
           });
-          if(e5Hits.length > 0){
-            // Latest E5 hit = the actual departure time
-            e5Hits.sort(function(a,b){ return new Date(b.updated)-new Date(a.updated); });
-            var lastE5 = new Date(e5Hits[0].updated).getTime();
+          if(berthHits.length > 0){
+            // Latest berth hit = the actual departure time
+            berthHits.sort(function(a,b){ return new Date(b.updated)-new Date(a.updated); });
+            var lastHit = new Date(berthHits[0].updated).getTime();
+            // Score: E5 hits score highest, mixed berths lower but still positive
+            var berthScore = (bestBerth.europe === true) ? 15 : 5;
             return {
               mmsi: mmsi,
               vessel: TOYOTA_CARRIERS[mmsi],
-              e5Hits: e5Hits.length,
-              lastE5: e5Hits[0].updated,
-              // Score: more E5 hits + closer to depart date = better match
-              score: e5Hits.length * 10 -
-                     Math.abs(lastE5 - depMs)/86400000
+              berthName: bestBerth.name,
+              berthHits: berthHits.length,
+              lastBerth: berthHits[0].updated,
+              berthConfirmed: true,
+              score: berthScore + berthHits.length * 2 -
+                     Math.abs(lastHit - depMs)/86400000
             };
           }
           return null;
@@ -953,22 +990,22 @@ if(MMSI){
       candidates.sort(function(a,b){ return b.score - a.score; });
       process.stderr.write('Reverse-lookup '+candidates.length+' candidate(s) after route filter:\n');
       candidates.forEach(function(c){
-        process.stderr.write('  '+c.vessel+' ('+c.mmsi+'): '+c.e5Hits+
-                             ' E5 hits, last '+c.lastE5+', score '+c.score.toFixed(1)+
+        process.stderr.write('  '+c.vessel+' ('+c.mmsi+'): '+c.berthHits+
+                             ' hits at '+c.berthName+', last '+c.lastBerth+', score '+c.score.toFixed(1)+
                              ', pos '+(c.curLat?c.curLat.toFixed(1)+','+c.curLon.toFixed(1):'?')+
                              (c.curDest?', dest='+c.curDest:'')+'\n');
       });
       var winner = candidates[0];
-      process.stderr.write('Winner: '+winner.vessel+' (berth-verified via reverse-lookup)\n');
+      process.stderr.write('Winner: '+winner.vessel+' at '+winner.berthName+' berth (reverse-lookup)\n');
       matches = [{
         mmsi: winner.mmsi,
         vessel: winner.vessel,
-        time: winner.lastE5,
-        europeScore: 100,  // high confidence: berth-confirmed
+        time: winner.lastBerth,
+        europeScore: winner.berthName === 'E5' ? 100 : 80,  // E5=high confidence, mixed berth=good confidence
         berthConfirmed: true
       }];
     } else {
-      process.stderr.write('Reverse-lookup: no known Toyota carrier was at E5 in window '+
+      process.stderr.write('Reverse-lookup: no known Toyota carrier was at any Toyota Nagoya berth in window '+
                            new Date(winStart).toISOString().slice(0,10)+' to '+
                            new Date(winEnd).toISOString().slice(0,10)+
                            ' AND heading on Europe route\n');
