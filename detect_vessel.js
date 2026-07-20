@@ -516,8 +516,9 @@ if(MMSI){
 } else {
   // Detect vessel from port departures
   var pid = PORT_IDS[LEG] || PORT_IDS["nagoya"];
-  var carriers = LEG === "nagoya" ? CARRIERS_LEG1 :
-                 LEG === "zeebrugge" || LEG === "malmo" ? CARRIERS_LEG2 : CARRIERS_LEG1;
+  var carriers = LEG === "nagoya"     ? CARRIERS_LEG1 :
+                 LEG === "zeebrugge" ? CARRIERS_LEG2 :
+                 LEG === "malmo"     ? CARRIERS_LEG3 : CARRIERS_LEG1;
 
   // Departure window logic (calibrated from observed cases):
   // - Toyota's "left the factory" notification arrives ~1-7 days AFTER the ship
