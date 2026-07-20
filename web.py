@@ -1908,6 +1908,12 @@ TRACKER_PAGE = BASE + """
               {% set rel_accurate = false %}
             {% endif %}
             {% for event, date in step_dates[step_name].items() %}
+            {% if event == 'visited' and step_name == 'leftTheFactory' %}
+            {# 'visited' for leftTheFactory means when we OBSERVED it was already done,
+               not when the car actually left — skip it to avoid confusion (e.g. showing
+               July 20 as "visited" when the car left in late May, just because nobody
+               logged in until July to notice the transition) #}
+            {% else %}
             <div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap;">
               <div style="font-size:12px;color:var(--red);font-weight:500;">{{ event }}: {{ date }}</div>
               <div title="{{ rel_desc }}"
@@ -1920,6 +1926,7 @@ TRACKER_PAGE = BASE + """
                 <span>{{ rel_label }}</span>
               </div>
             </div>
+            {% endif %}
             {% endfor %}
             {% if not rel_accurate %}
             <div style="margin-top:8px;padding:8px 10px;
