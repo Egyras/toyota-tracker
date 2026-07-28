@@ -282,19 +282,32 @@ def _detect_local(argv, timeout):
         return None
     finally:
         _scraper_sem.release()
+    # detect_vessel.js narrates everything it does on stderr: the port page it
+    # requested, which vessels it saw, how each candidate scored, why any were
+    # rejected. Previously that was only printed when the process EXITED
+    # non-zero — but the interesting failure is "ran fine, found nothing", which
+    # exits 0. That made an empty result indistinguishable from a login failure,
+    # an empty port listing, or every candidate being filtered out.
+    if result.stderr and result.stderr.strip():
+        print(f"[detector stderr]\n{result.stderr[-4000:]}", file=sys.stderr)
+
     if result.returncode != 0:
-        # stderr is where detect_vessel.js reports why, so give a useful amount
-        # of it rather than a 200-char stub.
-        print(f"[vessel scraper] detector exited {result.returncode}:\n"
-              f"{result.stderr[-2000:]}", file=sys.stderr)
+        print(f"[vessel scraper] detector exited {result.returncode}", file=sys.stderr)
         return None
     if not result.stdout.strip():
+        print("[vessel scraper] detector produced no output", file=sys.stderr)
         return None
     try:
-        return json.loads(result.stdout)
+        data = json.loads(result.stdout)
     except ValueError as e:
-        print(f"[vessel scraper] bad JSON: {e}", file=sys.stderr)
+        print(f"[vessel scraper] bad JSON: {e} — first 300 chars: "
+              f"{result.stdout[:300]!r}", file=sys.stderr)
         return None
+    n = len(data.get('matches') or []) if isinstance(data, dict) else 0
+    print(f"[vessel scraper] detector ok: {n} match(es), "
+          f"position={'yes' if (isinstance(data, dict) and data.get('position')) else 'no'}",
+          file=sys.stderr)
+    return data
 
 
 def _detect_remote(argv, timeout):
