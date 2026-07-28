@@ -2665,10 +2665,15 @@ TRACKER_PAGE = BASE + """
     var url = '/api/vessel-detect/'+orderHash+'?depart_date='+date+'&leg='+leg;
     fetch(url).then(r=>r.json()).then(d=>{
       if(d.mmsi||d.lat) {
-        alert('✅ Vessel: '+(d.name||d.mmsi)+'\nPosition: '+d.lat+', '+d.lon+'\nSource: '+(d.source||'cache'));
+        /* NB: \\n not \n — TRACKER_PAGE is a plain Python string, so a single
+           backslash-n is turned into a REAL newline before the browser sees it,
+           and a literal newline inside a '...' JS string is a syntax error that
+           kills this entire <script> block (and with it the map and the vessel
+           detection call further down). */
+        alert('✅ Vessel: '+(d.name||d.mmsi)+'\\nPosition: '+d.lat+', '+d.lon+'\\nSource: '+(d.source||'cache'));
         location.reload();
       } else {
-        alert('❌ No Toyota carrier found for '+leg+' around '+date+'.\nTry adjusting the date by ±1-2 days.');
+        alert('❌ No Toyota carrier found for '+leg+' around '+date+'.\\nTry adjusting the date by ±1-2 days.');
       }
     }).catch(function(){ alert('Detection failed. Try again.'); });
   }
