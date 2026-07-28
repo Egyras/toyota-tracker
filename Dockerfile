@@ -21,6 +21,12 @@ RUN pip install --no-cache-dir requests flask
 
 # Install Node Playwright locally in /app so require('playwright') works
 WORKDIR /app
+
+# Install browsers to a shared, world-readable location instead of /root/.cache,
+# which only root can read. The scraper runs as an unprivileged user (below) so
+# that Chromium can enable its sandbox, and it must be able to find the binaries.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 # leaflet is vendored (not pulled from a CDN at runtime) so the page's
 # Content-Security-Policy can forbid third-party script origins outright.
 # Served by the /vendor/leaflet route in web.py.
@@ -33,10 +39,32 @@ RUN npm init -y \
 RUN test -f /app/node_modules/leaflet/dist/leaflet.js \
     && test -f /app/node_modules/leaflet/dist/leaflet.css
 
+# Unprivileged account for the browser. Chromium refuses to enable its sandbox
+# as root, which is why detect_vessel.js previously had to pass --no-sandbox.
+# The Flask process still starts as root so it can keep writing the existing
+# root-owned /data volume; only the browser subprocess drops to this user
+# (see _drop_priv_kwargs in web.py).
+RUN useradd --create-home --home-dir /home/pwuser --shell /usr/sbin/nologin pwuser \
+    && chmod -R a+rX /ms-playwright /app/node_modules \
+    && test -d /home/pwuser
+
+# Sanity-check that the unprivileged user can actually reach the browser binary —
+# otherwise the failure only shows up at runtime as "browser not found".
+RUN su -s /bin/sh pwuser -c 'ls /ms-playwright' >/dev/null
+
 # Copy app files
 COPY web.py /app/web.py
 COPY detect_vessel.js /app/detect_vessel.js
 
 EXPOSE 8080
 
+# One image, two roles — selected at runtime with the ROLE env var:
+#
+#   ROLE=web      (default) the Flask site: database, user credentials, no browser
+#   ROLE=scraper  Chromium only: MyShipTracking login, no database, no LAN route
+#
+# Deliberately one image rather than two. The scraper needs the same web.py and
+# detect_vessel.js, and a single build means the pair can never drift out of
+# sync — a mismatched detector and caller would fail in confusing ways.
+ENV ROLE=web
 CMD ["python", "/app/web.py"]

@@ -8,6 +8,29 @@ const LEG=process.argv[4]||"nagoya"; // which leg to detect: nagoya|zeebrugge|ma
 const DEST_COUNTRY=(process.argv[5]||"").toUpperCase();  // order destination country for route matching
 const HUB_PORT=(process.argv[6]||"").toUpperCase();      // intermediate hub port (e.g. SAGUNTO, ZEEBRUGGE)
 
+// ── URL component allowlists ─────────────────────────────────────────────────
+// Vessel names, MMSIs and IMOs are SCRAPED from myshiptracking.com, and the MMSI
+// can also arrive straight from an HTTP query parameter. Interpolating those raw
+// into a URL lets the source decide where we navigate next: a name containing
+// "@" reparses the authority, so "x@evil.com" turns
+//   https://www.myshiptracking.com/vessels/x@evil.com-mmsi-1
+// into a request to host "evil.com-mmsi-1". "/", "?", "#" and "\" similarly break
+// out of the intended path. Allowlisting is used rather than escaping because
+// these are identifiers with a known shape — anything outside it is not
+// something we should be fetching.
+function safeNum(v, maxLen){
+  var s = String(v == null ? "" : v).replace(/[^0-9]/g, "");
+  return s.slice(0, maxLen || 15);
+}
+function safeSlug(v, fallback){
+  var s = String(v == null ? "" : v)
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, "-")   // collapse everything else to a hyphen
+            .replace(/^-+|-+$/g, "")
+            .slice(0, 80);
+  return s || (fallback || "vessel");
+}
+
 // Region classification for reverse-lookup route matching.
 // France/Italy/Spain can be served via EITHER Sagunto (Med ship) or Zeebrugge (Northern ship),
 // so we return null for them unless HUB_PORT is known, to avoid false regional rejects.
@@ -169,7 +192,7 @@ var NAGOYA_BERTHS = [
 
 async function verifyBerth(mmsi, imo, departDate, leg) {
   try {
-    var url = 'https://shipinfo.net/topos/api/vessel/track?days=60&imo='+imo+'&mmsi='+mmsi;
+    var url = 'https://shipinfo.net/topos/api/vessel/track?days=60&imo='+safeNum(imo)+'&mmsi='+safeNum(mmsi);
     var resp = await fetch(url);
     var data = await resp.json();
     var points = Array.isArray(data) ? data : (data.data || data.points || []);
@@ -274,7 +297,7 @@ function getShipFinderPosition(mmsi) {
 // Fetch position via shipinfo.net satellite AIS (pure HTTP, no browser).
 async function getShipinfoPosition(mmsi, imo){
   try {
-    var url = 'https://shipinfo.net/topos/api/vessel/track?days=3&imo='+(imo||'')+'&mmsi='+mmsi;
+    var url = 'https://shipinfo.net/topos/api/vessel/track?days=3&imo='+safeNum(imo||'')+'&mmsi='+safeNum(mmsi);
     var resp = await fetch(url);
     var data = await resp.json();
     var pts = Array.isArray(data) ? data : (data.data || data.points || []);
@@ -305,9 +328,8 @@ async function getMstDetailHttp(mmsi, imo, name){
   return new Promise(function(resolve){
     try {
       var https = require('https');
-      var slug = (name || TOYOTA_CARRIERS[mmsi] || 'vessel')
-                   .toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
-      var path = '/vessels/'+slug+'-mmsi-'+mmsi+(imo?('-imo-'+imo):'');
+      var slug = safeSlug(name || TOYOTA_CARRIERS[mmsi]);
+      var path = '/vessels/'+slug+'-mmsi-'+safeNum(mmsi)+(imo?('-imo-'+safeNum(imo)):'');
       var opts = {
         hostname: 'www.myshiptracking.com',
         path: path,
@@ -475,15 +497,39 @@ if(MMSI && (D === 'dummy' || !D)){
 // Only runs when we don't have an MMSI yet (initial vessel detection).
 // ─────────────────────────────────────────────────────────────────────────
 const {chromium} = require("playwright");
+
+// ── Chromium sandbox ─────────────────────────────────────────────────────────
+// This browser visits a third-party site (myshiptracking.com) that we do not
+// control, on demand, from an unauthenticated HTTP request. That makes it the
+// most exposed component in the whole system: a renderer bug on that site is
+// remote code execution inside this container.
+//
+// '--no-sandbox' removes the mitigation that keeps such a bug contained. It was
+// here because Chromium refuses to sandbox when running as root, and the
+// container ran everything as root. web.py now drops to an unprivileged user
+// (SCRAPER_USER) before spawning this script, so the sandbox can stay on.
+//
+// Playwright's own guidance for exactly this case:
+//   "For web scraping or crawling, we recommend to create a separate user
+//    inside the Docker container and use the seccomp profile."
+//
+// Escape hatch: if Chromium fails to start in your environment (the usual cause
+// is Docker's default seccomp profile blocking user-namespace creation, which
+// the profile in seccomp_profile.json fixes), set CHROMIUM_NO_SANDBOX=1 on the
+// container to restore the old behaviour without a rebuild. That trades the
+// sandbox back away, so treat it as temporary.
+const SANDBOX_OFF = process.env.CHROMIUM_NO_SANDBOX === "1";
+if (SANDBOX_OFF) {
+  process.stderr.write("WARNING: Chromium sandbox disabled via CHROMIUM_NO_SANDBOX=1 — " +
+                       "a renderer exploit on a scraped page becomes code execution in this container.\n");
+}
 const br=await chromium.launch({
   headless: true,
   args: [
     '--disable-dev-shm-usage',  // use /tmp not /dev/shm (which is small in Docker)
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
     '--disable-gpu',
     '--disable-blink-features=AutomationControlled',
-  ]
+  ].concat(SANDBOX_OFF ? ['--no-sandbox', '--disable-setuid-sandbox'] : [])
 });
 const pg=await (await br.newContext()).newPage();
 try{
@@ -517,7 +563,7 @@ if(MMSI){
   result.matches=[{mmsi:MMSI,vessel:TOYOTA_CARRIERS[MMSI]||"",time:""}];
 } else {
   // Detect vessel from port departures
-  var pid = PORT_IDS[LEG] || PORT_IDS["nagoya"];
+  var pid = Object.prototype.hasOwnProperty.call(PORT_IDS, LEG) ? PORT_IDS[LEG] : PORT_IDS["nagoya"];
   var carriers = LEG === "nagoya"     ? CARRIERS_LEG1 :
                  LEG === "zeebrugge" ? CARRIERS_LEG2 :
                  LEG === "malmo"     ? CARRIERS_LEG3 : CARRIERS_LEG1;
@@ -535,7 +581,7 @@ if(MMSI){
   var lf=new Date(D+"T00:00:00Z");
   var start=Math.floor((lf.getTime()-6*86400000)/1000);
   var end  =Math.floor((lf.getTime()-1*86400000)/1000);
-  var u="https://www.myshiptracking.com/ports-arrivals-departures/?mmsi=&pid="+pid+"&type=2&time="+start+"_"+end+"&pp=200";
+  var u="https://www.myshiptracking.com/ports-arrivals-departures/?mmsi=&pid="+safeNum(pid)+"&type=2&time="+safeNum(start,12)+"_"+safeNum(end,12)+"&pp=200";
   process.stderr.write("Port "+LEG+" (pid:"+pid+") URL: "+u+"\n");
   await pg.goto(u,{timeout:30000});
   await pg.waitForTimeout(6000);
@@ -601,7 +647,7 @@ if(MMSI){
           m.europeScore -= 20;
         }
         var vurl="https://www.myshiptracking.com/vessels/"+
-                 m.vessel.toLowerCase().replace(/\s+/g,"-")+"-mmsi-"+m.mmsi;
+                 safeSlug(m.vessel)+"-mmsi-"+safeNum(m.mmsi);
         await pg.goto(vurl,{timeout:20000});
         await pg.waitForTimeout(3000);
         var vtext=await pg.textContent("body");
@@ -629,7 +675,7 @@ if(MMSI){
         ];
         // Singapore, Port Klang, Colombo, Suez ARE on the Europe route — never penalise these.
         try {
-          var liveApi="https://www.myshiptracking.com/requests/vesselsonmaptempTTT.php?type=json&minlat=-90&maxlat=90&minlon=-180&maxlon=180&zoom=2&selid="+m.mmsi+"&seltype=0&timecode=-1&filters=%7B%7D";
+          var liveApi="https://www.myshiptracking.com/requests/vesselsonmaptempTTT.php?type=json&minlat=-90&maxlat=90&minlon=-180&maxlon=180&zoom=2&selid="+safeNum(m.mmsi)+"&seltype=0&timecode=-1&filters=%7B%7D";
           var liveResp=await pg.evaluate(async function(url){var r=await fetch(url);return await r.text();},liveApi);
           var liveDestMatch=liveResp.match(m.mmsi+"\t[^\t]+\t[\d\.]+\t[\d\.]+\t[\d\.]+\t[\d\.]+\t[\d]+\t[\d]+\t[\d]+\t[\d]+\t\t[\d]+\t([A-Z>][^\n\t]*)");
           if(liveDestMatch){
@@ -710,7 +756,7 @@ if(MMSI){
         try {
           var depMs = new Date(D+"T00:00:00Z").getTime();
           var trackUrl = 'https://shipinfo.net/topos/api/vessel/track?days=60&imo='+
-                         (VESSEL_IMO[m.mmsi]||'')+'&mmsi='+m.mmsi;
+                         safeNum(VESSEL_IMO[m.mmsi]||'')+'&mmsi='+safeNum(m.mmsi);
           var trackResp = await fetch(trackUrl);
           var trackData = await trackResp.json();
           var trackPts = Array.isArray(trackData) ? trackData : (trackData.data || trackData.points || []);
@@ -852,7 +898,7 @@ if(MMSI){
         try {
           var imo = VESSEL_IMO[mmsi] || '';
           if(!imo) return null;  // shipinfo needs IMO to return data
-          var url = 'https://shipinfo.net/topos/api/vessel/track?days=20&imo='+imo+'&mmsi='+mmsi;
+          var url = 'https://shipinfo.net/topos/api/vessel/track?days=20&imo='+safeNum(imo)+'&mmsi='+safeNum(mmsi);
           var resp = await fetch(url);
           var data = await resp.json();
           var pts = Array.isArray(data) ? data : (data.data || data.points || []);
@@ -912,7 +958,7 @@ if(MMSI){
         try {
           var imo = VESSEL_IMO[mmsi] || '';
           if(!imo) return null;
-          var url = 'https://shipinfo.net/topos/api/vessel/track?days=120&imo='+imo+'&mmsi='+mmsi;
+          var url = 'https://shipinfo.net/topos/api/vessel/track?days=120&imo='+safeNum(imo)+'&mmsi='+safeNum(mmsi);
           var resp = await fetch(url);
           var data = await resp.json();
           var pts = Array.isArray(data) ? data : (data.data || data.points || []);
@@ -1040,9 +1086,8 @@ if(MMSI){
 async function getMstDetail(pg, mmsi, imo, name){
   try {
     // Build the detail-page slug: name-mmsi-MMSI-imo-IMO
-    var slug = (name||TOYOTA_CARRIERS[mmsi]||"vessel")
-                 .toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"");
-    var url = "https://www.myshiptracking.com/vessels/"+slug+"-mmsi-"+mmsi+(imo?("-imo-"+imo):"");
+    var slug = safeSlug(name||TOYOTA_CARRIERS[mmsi]);
+    var url = "https://www.myshiptracking.com/vessels/"+slug+"-mmsi-"+safeNum(mmsi)+(imo?("-imo-"+safeNum(imo)):"");
     var html = await pg.evaluate(async function(u){
       try { var r = await fetch(u); return await r.text(); } catch(e){ return ""; }
     }, url);
@@ -1087,7 +1132,7 @@ async function getMstDetail(pg, mmsi, imo, name){
 
 // Get position
 if(result.mmsi){
-  var apiUrl="https://www.myshiptracking.com/requests/vesselonmap.php?type=json&mmsi="+result.mmsi+"&_="+Date.now();
+  var apiUrl="https://www.myshiptracking.com/requests/vesselonmap.php?type=json&mmsi="+safeNum(result.mmsi)+"&_="+Date.now();
   var apiResp=await pg.evaluate(async function(url){var r=await fetch(url);return await r.text();},apiUrl);
   process.stderr.write("MST API: "+apiResp.slice(0,80)+"\n");
   var parts=apiResp.trim().split(/\s+/);

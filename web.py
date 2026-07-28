@@ -20,6 +20,72 @@ BEHIND_TRUSTED_PROXY = os.environ.get("BEHIND_TRUSTED_PROXY", "1") == "1"
 # script-src free of third-party origins.
 VENDOR_DIR = os.environ.get("VENDOR_DIR", "/app/node_modules")
 
+# ── Roles ─────────────────────────────────────────────────────────────────────
+# One image, two jobs, chosen at runtime:
+#
+#   ROLE=web      the Flask site. Holds the database and receives users' Toyota
+#                 credentials. Owns NO MyShipTracking login and never launches a
+#                 browser — it asks the scraper over the internal network.
+#   ROLE=scraper  runs Chromium against myshiptracking.com. Holds ONLY the MST
+#                 login: no database, no Toyota credentials, no published port,
+#                 no route off the internal network except outbound HTTPS.
+#
+# The point of the split is blast radius. Chromium visiting a third party we do
+# not control is the most likely place to get code execution; putting it in a
+# container that holds nothing and can reach nothing means an exploit there wins
+# a MyShipTracking account, not the database and not a foothold on the LAN.
+ROLE = os.environ.get("ROLE", "web").strip().lower()
+if ROLE not in ("web", "scraper"):
+    print(f"[config] unknown ROLE={ROLE!r}, defaulting to 'web'", file=sys.stderr)
+    ROLE = "web"
+
+# Base URL of the scraper service, e.g. http://toyota-scraper:8080. Empty means
+# single-container mode: the web role runs the browser itself, exactly as before.
+SCRAPER_URL   = os.environ.get("SCRAPER_URL", "").strip()
+# Shared secret for the internal endpoint. Defence in depth — the scraper is not
+# published and sits on an internal Docker network, but nothing about that should
+# be load-bearing on its own.
+SCRAPER_TOKEN = os.environ.get("SCRAPER_TOKEN", "").strip()
+
+# Unprivileged account the browser scraper runs as. Chromium will not enable its
+# sandbox while running as root, which is the only reason detect_vessel.js used
+# to pass --no-sandbox. Created in the Dockerfile. Set SCRAPER_USER="" to run the
+# scraper as the current user (i.e. root) if the account is missing.
+SCRAPER_USER = os.environ.get("SCRAPER_USER", "pwuser")
+SCRAPER_HOME = os.environ.get("SCRAPER_HOME", "/home/pwuser")
+
+
+def _drop_priv_kwargs():
+    """subprocess kwargs that run the browser as SCRAPER_USER instead of root.
+
+    Returns {} when we are already unprivileged, when no such account exists, or
+    on any platform without POSIX users — in every one of those cases the caller
+    behaves exactly as before, so a misconfigured image degrades to the old
+    behaviour rather than failing to scrape at all.
+    """
+    if not SCRAPER_USER:
+        return {}
+    try:
+        if os.geteuid() != 0:      # already unprivileged, nothing to drop
+            return {}
+        import pwd
+        entry = pwd.getpwnam(SCRAPER_USER)
+    except (AttributeError, ImportError, KeyError):
+        print(f"[scraper] user {SCRAPER_USER!r} unavailable — running browser as current user",
+              file=sys.stderr)
+        return {}
+    return {"user": entry.pw_uid, "group": entry.pw_gid}
+
+
+# Legs the detector knows about — mirrors PORT_IDS in detect_vessel.js. Used to
+# reject arbitrary ?leg= values before they reach the scraper or the database.
+VALID_LEGS = {
+    "nagoya", "yokkaichi", "hiroshima",
+    "zeebrugge", "bremerhaven", "antwerp", "southampton", "portbury",
+    "livorno", "sagunto", "malmo", "gothenburg", "paldiski", "drammen",
+    "piraeus", "vejle",
+}
+
 
 # ── Abuse controls ────────────────────────────────────────────────────────────
 # /api/vessel-detect spawns a headless Chromium via detect_vessel.js with a
@@ -152,20 +218,99 @@ def is_wrong_continent_for_order(vessel_dest: str, order_dest_country: str) -> b
     return False
 
 
+def _detect_local(argv, timeout):
+    """Run detect_vessel.js in this container and return its parsed JSON, or None.
+
+    This is where the browser actually launches, so the concurrency ceiling and
+    the privilege drop both live here — which means they apply automatically
+    whichever container ends up doing the work.
+    """
+    env = os.environ.copy()
+    env['MST_EMAIL']    = MST_EMAIL
+    env['MST_PASSWORD'] = MST_PASSWORD
+    env['HOME']         = SCRAPER_HOME   # Chromium needs a writable HOME
+    # Hard ceiling on concurrent Chromium instances. Waiting rather than failing
+    # keeps normal single-user page loads working unchanged; the short timeout
+    # means a saturated queue degrades to "not detected" instead of piling up
+    # processes.
+    if not _scraper_sem.acquire(timeout=20):
+        print("[vessel scraper] all scraper slots busy, skipping", file=sys.stderr)
+        return None
+    try:
+        result = subprocess.run(
+            ['node', '/app/detect_vessel.js', *argv],
+            capture_output=True, text=True, timeout=timeout, env=env,
+            **_drop_priv_kwargs()
+        )
+    except subprocess.TimeoutExpired:
+        print(f"[vessel scraper] timed out after {timeout}s", file=sys.stderr)
+        return None
+    finally:
+        _scraper_sem.release()
+    if result.returncode != 0:
+        print(f"[vessel scraper] error: {result.stderr[:200]}", file=sys.stderr)
+        return None
+    if not result.stdout.strip():
+        return None
+    try:
+        return json.loads(result.stdout)
+    except ValueError as e:
+        print(f"[vessel scraper] bad JSON: {e}", file=sys.stderr)
+        return None
+
+
+def _detect_remote(argv, timeout):
+    """Ask the isolated scraper container to do it, over the internal network.
+
+    The scraper holds only the MyShipTracking login — no database, no Toyota
+    credentials, no route to the LAN — so a Chromium compromise there yields
+    nothing but that one account. See run_detector() for why this indirection
+    exists at all.
+    """
+    import requests
+    try:
+        r = requests.post(
+            SCRAPER_URL.rstrip('/') + '/internal/detect',
+            json={"argv": list(argv)},
+            headers={"X-Scraper-Token": SCRAPER_TOKEN},
+            timeout=timeout + 15,   # allow for queueing on the scraper side
+        )
+    except Exception as e:
+        print(f"[vessel scraper] scraper service unreachable: {e}", file=sys.stderr)
+        return None
+    if r.status_code != 200:
+        print(f"[vessel scraper] scraper service returned {r.status_code}: {r.text[:200]}",
+              file=sys.stderr)
+        return None
+    try:
+        body = r.json()
+    except ValueError:
+        return None
+    return body.get("result")
+
+
+def run_detector(argv, timeout):
+    """Single entry point for 'run the browser scraper and give me its JSON'.
+
+    Both call sites below used to shell out directly. Routing them through here
+    means the web container can hand the work to a separate, network-isolated
+    container without either call site knowing. If SCRAPER_URL is unset the
+    behaviour is byte-for-byte what it was before, so a single-container deploy
+    keeps working unchanged.
+    """
+    if SCRAPER_URL and ROLE == "web":
+        return _detect_remote(argv, timeout)
+    return _detect_local(argv, timeout)
+
+
 def get_vessel_position(mmsi: str, order_dest_country: str = None) -> dict | None:
     """Get vessel position — scrape MyShipTracking first (free), fallback to aisstream/DataDocked."""
-    # Try MST scraper (free, same login we use for detection)
-    if MST_EMAIL and MST_PASSWORD:
+    # Try MST scraper (free, same login we use for detection).
+    # See detect_vessel_scraper() on why SCRAPER_URL bypasses the credential check.
+    if SCRAPER_URL or (MST_EMAIL and MST_PASSWORD):
         try:
-            env = os.environ.copy()
-            env['MST_EMAIL']    = MST_EMAIL
-            env['MST_PASSWORD'] = MST_PASSWORD
-            result = subprocess.run(
-                ['node', '/app/detect_vessel.js', 'dummy', mmsi],
-                capture_output=True, text=True, timeout=60, env=env
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                data = json.loads(result.stdout)
+            data = run_detector(['dummy', mmsi], 60)
+            if data:
                 pos  = data.get('position', {})
                 if pos.get('lat'):
                     # SMART VESSEL VALIDATION — multi-criteria:
@@ -242,8 +387,13 @@ def get_vessel_position(mmsi: str, order_dest_country: str = None) -> dict | Non
     except Exception:
         pass
 
-    # Last resort: DataDocked (satellite, uses credits)
-    return _fetch_datadocked(mmsi)
+    # Last resort: DataDocked (satellite, uses credits) — never implemented.
+    # This used to `return _fetch_datadocked(mmsi)`, a function that does not
+    # exist anywhere in the file, so whenever the scraper and aisstream both came
+    # up empty the endpoint raised NameError and returned 500 instead of the
+    # intended "no position data" 404. Returning None restores that contract;
+    # wire in a real satellite lookup here if it is ever added.
+    return None
 
 
 def _cache_vessel(db, order_hash: str, vessel: dict, leg: str = "nagoya"):
@@ -286,30 +436,16 @@ def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya",
     dest_country: order destination country, used for route region matching.
     hub_port: intermediate hub (e.g. SAGUNTO, ZEEBRUGGE) to override region inference.
     """
-    if not MST_EMAIL or not MST_PASSWORD:
+    # MST credentials live on whichever container actually runs the browser. In
+    # the split deployment that is the scraper, and the web container has none —
+    # so only gate on them when we are the one doing the work.
+    if not SCRAPER_URL and (not MST_EMAIL or not MST_PASSWORD):
         return None
     try:
-        env = os.environ.copy()
-        env['MST_EMAIL']    = MST_EMAIL
-        env['MST_PASSWORD'] = MST_PASSWORD
-        # Hard ceiling on concurrent Chromium instances. Waiting rather than
-        # failing keeps normal single-user page loads working unchanged; the
-        # short timeout means a saturated queue degrades to "not detected"
-        # instead of piling up processes.
-        if not _scraper_sem.acquire(timeout=20):
-            print("[vessel scraper] all scraper slots busy, skipping", file=sys.stderr)
+        data = run_detector(
+            [left_factory_date, '', leg, dest_country or '', hub_port or ''], 120)
+        if not data:
             return None
-        try:
-            result = subprocess.run(
-                ['node', '/app/detect_vessel.js', left_factory_date, '', leg, dest_country or '', hub_port or ''],
-                capture_output=True, text=True, timeout=120, env=env
-            )
-        finally:
-            _scraper_sem.release()
-        if result.returncode != 0:
-            print(f"[vessel scraper] error: {result.stderr[:200]}", file=sys.stderr)
-            return None
-        data = json.loads(result.stdout)
         matches = data.get('matches', [])
         if not matches:
             return None
@@ -3633,6 +3769,73 @@ document.querySelectorAll('.utc-time').forEach(function(el) {
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+# ── Scraper role ──────────────────────────────────────────────────────────────
+
+@app.before_request
+def scraper_role_lockdown():
+    """In scraper mode, serve the internal API and nothing else.
+
+    The scraper image is the same image as the web app, so every user-facing
+    route technically exists in it. None of them should ever answer: this
+    container has no database and no business rendering pages. Refusing
+    everything but /internal/* keeps that true even if the container is
+    accidentally published or reachable from somewhere unexpected.
+    """
+    if ROLE != "scraper":
+        return None
+    if request.path == "/healthz" or request.path.startswith("/internal/"):
+        return None
+    return jsonify(error="not_available", role="scraper"), 404
+
+
+@app.route("/healthz")
+def healthz():
+    return jsonify(status="ok", role=ROLE)
+
+
+@app.route("/internal/detect", methods=["POST"])
+def internal_detect():
+    """Run the browser scraper on behalf of the web container.
+
+    Deliberately dumb: it takes the detector's positional arguments, validates
+    them, runs it, and returns the raw JSON. No database access and no knowledge
+    of orders — if this container is compromised there is nothing here worth
+    stealing beyond the MyShipTracking session it already holds.
+    """
+    if ROLE != "scraper":
+        return jsonify(error="not_a_scraper"), 404
+    # constant-time compare so a wrong token cannot be discovered by timing
+    supplied = request.headers.get("X-Scraper-Token", "")
+    if not SCRAPER_TOKEN or not hmac.compare_digest(supplied, SCRAPER_TOKEN):
+        return jsonify(error="forbidden"), 403
+
+    body = request.get_json(silent=True) or {}
+    argv = body.get("argv")
+    if not isinstance(argv, list) or not (2 <= len(argv) <= 5):
+        return jsonify(error="bad argv"), 400
+    argv = ["" if a is None else str(a) for a in argv]
+
+    # Re-validate here rather than trusting the caller. The web container already
+    # checks these at its own boundary, but a service that runs a browser on
+    # request should never depend on someone else having sanitised its input.
+    date_or_dummy, mmsi = argv[0], argv[1]
+    if date_or_dummy != "dummy":
+        try:
+            datetime.strptime(date_or_dummy, "%Y-%m-%d")
+        except ValueError:
+            return jsonify(error="bad date"), 400
+    if mmsi and not (mmsi.isdigit() and len(mmsi) <= 15):
+        return jsonify(error="bad mmsi"), 400
+    if len(argv) >= 3 and argv[2] and argv[2] not in VALID_LEGS:
+        return jsonify(error="bad leg"), 400
+    for extra in argv[3:]:
+        if len(extra) > 64 or not all(c.isalnum() or c in " -_." for c in extra):
+            return jsonify(error="bad argument"), 400
+
+    timeout = 60 if date_or_dummy == "dummy" else 120
+    return jsonify(result=_detect_local(argv, timeout))
+
+
 @app.route("/vendor/leaflet/<path:filename>")
 def vendor_leaflet(filename):
     """Serve Leaflet from our own origin.
@@ -3888,7 +4091,7 @@ def index():
 @app.route("/api/vessel/<mmsi>")
 @rate_limited(max_hits=20, per_seconds=60)
 def api_vessel(mmsi):
-    if mmsi not in TOYOTA_CARRIERS and not mmsi.isdigit():
+    if mmsi not in TOYOTA_CARRIERS and not (mmsi.isdigit() and len(mmsi) <= 15):
         return jsonify(error="invalid mmsi"), 400
     pos = get_vessel_position(mmsi)
     if not pos:
@@ -3940,6 +4143,22 @@ def api_vessel_detect(order_hash):
     depart_date_override = request.args.get('depart_date') or body.get('depart_date')
     mmsi_override        = request.args.get('mmsi')        or body.get('mmsi')
     leg_override         = request.args.get('leg', 'nagoya')
+
+    # Validate at the boundary. All three are forwarded to detect_vessel.js and
+    # end up inside scraper URLs; detect_vessel.js allowlists them again on its
+    # side, but rejecting junk here means it never reaches the scraper at all and
+    # never gets written into vessel_overrides.
+    if leg_override not in VALID_LEGS:
+        return jsonify(error="invalid leg"), 400
+    if depart_date_override:
+        try:
+            datetime.strptime(depart_date_override, "%Y-%m-%d")
+        except (ValueError, TypeError):
+            return jsonify(error="invalid depart_date, expected YYYY-MM-DD"), 400
+    if mmsi_override:
+        mmsi_override = str(mmsi_override).strip()
+        if not (mmsi_override.isdigit() and len(mmsi_override) <= 15):
+            return jsonify(error="invalid mmsi"), 400
 
     # If user provided a date or MMSI, save it to vessel_overrides
     if depart_date_override or mmsi_override:
@@ -4177,7 +4396,9 @@ def api_vessel_detect(order_hash):
             else:
                 # True last resort: use today. This will likely produce a wrong
                 # detection window — user should enter the date manually.
-                from datetime import datetime
+                # (No local `from datetime import datetime` here: a function-scoped
+                # import makes `datetime` local to the WHOLE function, shadowing the
+                # module-level one and breaking every earlier use of it.)
                 left_factory_date = datetime.utcnow().strftime("%Y-%m-%d")
                 print(f"[api_vessel_detect] WARNING: no hub date found for leg={leg_override}, "
                       f"order={order_hash[:10]} — using today as fallback, detection may be inaccurate",
@@ -4253,7 +4474,7 @@ def api_vessel_detect(order_hash):
     }
     transit_offset = NEXT_HUB_TRANSIT_DAYS.get(leg_override, 0)
     if transit_offset > 0:
-        from datetime import datetime, timedelta
+        # Uses the module-level datetime/timedelta — see note above on shadowing.
         try:
             base = datetime.strptime(left_factory_date, "%Y-%m-%d")
             save_depart_date = (base + timedelta(days=transit_offset)).strftime("%Y-%m-%d")
@@ -4316,5 +4537,29 @@ def stats():
     pct = int(d["delayed"] / d["total"] * 100) if d["total"] else 0
     return render_template_string(STATS_PAGE, pct_delayed=pct, request=request, **d)
 
+def _startup_checks():
+    """Fail loudly on a misconfigured split deployment rather than silently
+    falling back to the old single-container behaviour, which would put Chromium
+    back in the web container without anyone noticing."""
+    if ROLE == "scraper":
+        if not SCRAPER_TOKEN:
+            sys.exit("FATAL: ROLE=scraper requires SCRAPER_TOKEN")
+        if not MST_EMAIL or not MST_PASSWORD:
+            print("WARNING: scraper has no MST credentials — detection will return nothing",
+                  file=sys.stderr)
+        if os.environ.get("DB_PATH"):
+            print("WARNING: DB_PATH is set on the scraper. It has no need for the "
+                  "database; unset it so a compromise cannot reach one.", file=sys.stderr)
+    else:
+        if SCRAPER_URL and not SCRAPER_TOKEN:
+            sys.exit("FATAL: SCRAPER_URL is set but SCRAPER_TOKEN is empty")
+        if not SCRAPER_URL:
+            print("NOTE: SCRAPER_URL unset — running the browser in this container "
+                  "(single-container mode).", file=sys.stderr)
+    print(f"[startup] role={ROLE} scraper={'remote' if (SCRAPER_URL and ROLE=='web') else 'local'}",
+          file=sys.stderr)
+
+
 if __name__ == "__main__":
+    _startup_checks()
     app.run(host="0.0.0.0", port=8080)
