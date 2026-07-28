@@ -489,12 +489,18 @@ def _cache_vessel(db, order_hash: str, vessel: dict, leg: str = "nagoya"):
 
 
 def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya",
-                          dest_country: str = "", hub_port: str = "") -> dict | None:
+                          dest_country: str = "", hub_port: str = "",
+                          window_end: str = "") -> dict | None:
     """
     Detect vessel by scraping MyShipTracking port departures.
     leg: nagoya (default), zeebrugge, malmo, bremerhaven etc.
     dest_country: order destination country, used for route region matching.
     hub_port: intermediate hub (e.g. SAGUNTO, ZEEBRUGGE) to override region inference.
+    window_end: date the car was first seen at the NEXT hub. On a feeder leg the
+        sailing is bracketed — it cannot have left before the car reached this
+        hub, and cannot have arrived after the car showed up at the next one —
+        so this turns a guessed +/-N day span into an interval derived from two
+        real observations.
     """
     # MST credentials live on whichever container actually runs the browser. In
     # the split deployment that is the scraper, and the web container has none —
@@ -503,7 +509,8 @@ def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya",
         return None
     try:
         data = run_detector(
-            [left_factory_date, '', leg, dest_country or '', hub_port or ''], 120)
+            [left_factory_date, '', leg, dest_country or '', hub_port or '',
+             window_end or ''], 120)
         if not data:
             return None
         matches = data.get('matches', [])
@@ -526,11 +533,13 @@ def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya",
 
 
 def detect_vessel(left_factory_date: str, leg: str = "nagoya",
-                  dest_country: str = "", hub_port: str = "") -> dict | None:
+                  dest_country: str = "", hub_port: str = "",
+                  window_end: str = "") -> dict | None:
     """Auto-detect vessel via MyShipTracking port departure scraper."""
     if not left_factory_date:
         return None
-    vessel = detect_vessel_scraper(left_factory_date, leg=leg, dest_country=dest_country, hub_port=hub_port)
+    vessel = detect_vessel_scraper(left_factory_date, leg=leg, dest_country=dest_country,
+                                   hub_port=hub_port, window_end=window_end)
     if vessel:
         pos = get_vessel_position(vessel['mmsi'])
         if pos:
@@ -4432,7 +4441,12 @@ def api_vessel_detect(order_hash):
             WHERE sd.order_hash=? AND sd.step='leftTheFactory'
             AND sd.date_entered IS NOT NULL
         """, (order_hash,)).fetchone()
-        if row:
+        # leftTheFactory is the NAGOYA anchor and only that. Using it for a feeder
+        # leg asks MyShipTracking for departures around the day the car left
+        # Japan — months earlier — and MST only retains ~20 days, so the port
+        # listing comes back completely empty ("0 matches from 0 total").
+        # A feeder leg must anchor on the hub, so it skips this branch entirely.
+        if row and leg_override in ('nagoya', 'yokkaichi', 'hiroshima'):
             left_factory_date = row["date_entered"]
         elif leg_override != 'nagoya':
             # For feeder legs (zeebrugge/malmo/etc.) we need the date the car
@@ -4506,6 +4520,53 @@ def api_vessel_detect(order_hash):
         else:
             return jsonify(error="no leftTheFactory date"), 404
 
+    # ── Close the other end of the window ────────────────────────────────────
+    # A fixed "+N days" span is a guess. The sailing is actually bracketed by two
+    # things we observed directly: it cannot have departed before the car was at
+    # THIS hub, and it cannot still have been at sea after the car turned up at
+    # the NEXT one. Find when the next stop after this leg's hub was first seen,
+    # and hand that over as the far edge of the search.
+    window_end = ""
+    if leg_override not in ('nagoya', 'yokkaichi', 'hiroshima'):
+        try:
+            hub_names = {
+                'zeebrugge': ['ZEEBRUGGE', 'ZEEBRUGG'],
+                'malmo':     ['MALMO', 'MALMÖ', 'MALMOE'],
+                'sagunto':   ['SAGUNTO'],
+                'livorno':   ['LIVORNO'],
+                'portbury':  ['PORTBURY', 'BRISTOL'],
+                'southampton': ['SOUTHAMPTON'],
+                'drammen':   ['DRAMMEN'],
+                'piraeus':   ['PIRAEUS'],
+            }.get(leg_override, [])
+            rows = db.execute("""
+                SELECT ts, deliveries_json FROM checks
+                WHERE order_hash=? AND deliveries_json IS NOT NULL
+                ORDER BY ts ASC
+            """, (order_hash,)).fetchall()
+            for r in rows:
+                stops = json.loads(r["deliveries_json"])
+                if not isinstance(stops, list):
+                    continue
+                # locate this leg's hub, then look at everything after it
+                idx = next((i for i, d in enumerate(stops)
+                            if any(h in (d.get("loc") or d.get("locationName") or "").upper()
+                                   for h in hub_names)), None)
+                if idx is None:
+                    continue
+                for d in stops[idx + 1:]:
+                    state = (d.get("visited") or d.get("isVisited") or "")
+                    if state in ('current', 'visited'):
+                        window_end = r["ts"][:10]
+                        break
+                if window_end:
+                    break
+        except Exception as e:
+            print(f"[api_vessel_detect] window_end lookup failed: {e}", file=sys.stderr)
+        print(f"[api_vessel_detect] leg={leg_override} anchor={left_factory_date} "
+              f"window_end={window_end or '(none — falling back to fixed span)'}",
+              file=sys.stderr)
+
     # Fetch order's destination country for region-aware reverse-lookup
     dest_row = db.execute(
         "SELECT dest_country FROM checks WHERE order_hash=? AND dest_country IS NOT NULL "
@@ -4548,7 +4609,8 @@ def api_vessel_detect(order_hash):
         elif _dc in ('ITALY', 'CROATIA', 'SLOVENIA', 'MALTA'):
             hub_port = 'LIVORNO'
 
-    vessel = detect_vessel(left_factory_date, leg=leg_override, dest_country=dest_country, hub_port=hub_port)
+    vessel = detect_vessel(left_factory_date, leg=leg_override, dest_country=dest_country,
+                           hub_port=hub_port, window_end=window_end)
     if not vessel:
         return jsonify(error="no vessel detected"), 404
 

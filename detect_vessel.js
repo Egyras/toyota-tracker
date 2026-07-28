@@ -7,6 +7,9 @@ const MMSI=process.argv[3]||"";
 const LEG=process.argv[4]||"nagoya"; // which leg to detect: nagoya|zeebrugge|malmo
 const DEST_COUNTRY=(process.argv[5]||"").toUpperCase();  // order destination country for route matching
 const HUB_PORT=(process.argv[6]||"").toUpperCase();      // intermediate hub port (e.g. SAGUNTO, ZEEBRUGGE)
+// Date the car was first seen at the NEXT hub. Optional; when present it closes
+// the far end of the departure window with an observation instead of a guess.
+const WINDOW_END=(process.argv[7]||"").trim();
 
 // ── URL component allowlists ─────────────────────────────────────────────────
 // Vessel names, MMSIs and IMOs are SCRAPED from myshiptracking.com, and the MMSI
@@ -602,12 +605,41 @@ if(MMSI){
   //   +8 days: cars wait at the hub for the next feeder sailing; the observed
   //            Zeebrugge->Malmo cycle runs about a week.
   var lf=new Date(D+"T00:00:00Z");
-  var isDeepSea = (LEG === "nagoya" || LEG === "yokkaichi" || LEG === "hiroshima");
+  var isDeepSea = !IS_FEEDER_LEG;
   var backDays    = isDeepSea ? 6 : 2;
   var forwardDays = isDeepSea ? 1 : -8;   // negative = search forward past D
   var start=Math.floor((lf.getTime()-backDays*86400000)/1000);
   var end  =Math.floor((lf.getTime()-forwardDays*86400000)/1000);
-  process.stderr.write("Departure window for "+LEG+" ("+(isDeepSea?"deep-sea":"feeder")+"): "+
+  var windowSource = isDeepSea ? "deep-sea, fixed span" : "feeder, fixed span";
+
+  // If the caller knows when the car turned up at the NEXT hub, the sailing is
+  // bracketed by two real observations rather than guessed at: it cannot have
+  // left before the car was here, and cannot still have been at sea after the
+  // car appeared there. That is both tighter and safer than any +/-N default —
+  // a fixed span is only ever right by luck, and when the two hub observations
+  // are far apart (infrequent logins) a short window misses the sailing
+  // entirely, which is exactly how Danube/Elbe Highway were never in the list.
+  if(!isDeepSea && WINDOW_END && /^\d{4}-\d{2}-\d{2}$/.test(WINDOW_END)){
+    var we = new Date(WINDOW_END+"T00:00:00Z");
+    if(!isNaN(we) && we.getTime() >= lf.getTime()){
+      end = Math.floor((we.getTime()+1*86400000)/1000);   // +1d for observation lag
+
+      // Work BACKWARDS from the next-hub arrival, not forwards from this hub.
+      // Arriving at Zeebrugge only says when the car got there — it can wait days
+      // for the next sailing, so that date is a weak lower bound and anchoring on
+      // it produces a window that is both too wide and centred in the wrong place.
+      // The Malmo arrival is the tight signal: the voyage ENDS there, so the
+      // departure sits roughly one sea-transit earlier. Zeebrugge still bounds
+      // it — the ship cannot have left before the car arrived — so take whichever
+      // lower bound is later.
+      var maxTransitDays = parseInt(process.env.FEEDER_TRANSIT_DAYS || "7", 10);
+      var backstop = Math.floor((we.getTime() - maxTransitDays*86400000)/1000);
+      if(backstop > start) start = backstop;
+      windowSource = "feeder, back from next-hub arrival "+WINDOW_END+
+                     " (max "+maxTransitDays+"d transit, floored at this hub's arrival)";
+    }
+  }
+  process.stderr.write("Departure window for "+LEG+" ("+windowSource+"): "+
     new Date(start*1000).toISOString().slice(0,10)+" .. "+
     new Date(end*1000).toISOString().slice(0,10)+" (anchor D="+D+")\n");
   var u="https://www.myshiptracking.com/ports-arrivals-departures/?mmsi=&pid="+safeNum(pid)+"&type=2&time="+safeNum(start,12)+"_"+safeNum(end,12)+"&pp=200";
