@@ -3868,7 +3868,19 @@ CSP = "; ".join([
     "script-src 'self' 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com",
-    "img-src 'self' data: blob: https://*.basemaps.cartocdn.com",
+    # 'https:' rather than a fixed allowlist: the vehicle photo comes from
+    # od.imageUrl, a Toyota-controlled CDN whose hostname we do not know ahead of
+    # time and which they can change without notice. Pinning it broke the image
+    # (that is a regression this directive caused, not a hypothetical).
+    #
+    # The cost is that img-src no longer blocks the "new Image().src = evil"
+    # exfiltration trick. That was never the load-bearing part of this policy —
+    # script-src already permits 'unsafe-inline' because the templates depend on
+    # inline handlers, so the real controls here are connect-src 'self' (no
+    # fetch/XHR off-origin), form-action 'self', and frame-ancestors 'none'.
+    # Images cannot execute; they can only leak, and only over a channel an
+    # attacker who already has script execution has cheaper ways to use.
+    "img-src 'self' data: blob: https:",
     "connect-src 'self'",
     "form-action 'self'",
     "frame-ancestors 'none'",
