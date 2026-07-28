@@ -363,7 +363,15 @@ def run_detector(argv, timeout):
     return _detect_local(argv, timeout)
 
 
-def get_vessel_position(mmsi: str, order_dest_country: str = None) -> dict | None:
+def get_vessel_position(mmsi: str, order_dest_country: str = None,
+                        known_name: str = "") -> dict | None:
+    """known_name: vessel name the CALLER already established, e.g. from the port
+    departure listing during detection. The position lookup re-derives the name
+    from a different endpoint, and when that endpoint returns no name the vessel
+    was rejected outright as "not a known carrier" — discarding a name we had
+    already read a moment earlier off the page that matched the carrier filter in
+    the first place. Passing it in keeps that knowledge instead of throwing it
+    away and failing the validation on it."""
     """Get vessel position — scrape MyShipTracking first (free), fallback to aisstream/DataDocked."""
     # Try MST scraper (free, same login we use for detection).
     # See detect_vessel_scraper() on why SCRAPER_URL bypasses the credential check.
@@ -384,7 +392,7 @@ def get_vessel_position(mmsi: str, order_dest_country: str = None) -> dict | Non
                     #   - MMSI in TOYOTA_CARRIERS = verified
                     #   - Name fits PCC pattern but MMSI unknown = unverified (show with warning)
                     import re
-                    vname = pos.get('name') or TOYOTA_CARRIERS.get(mmsi, '')
+                    vname = pos.get('name') or TOYOTA_CARRIERS.get(mmsi, '') or (known_name or '')
                     vdest = (pos.get('dest') or '').upper()
                     is_known = bool(TOYOTA_CARRIERS.get(mmsi))
                     # 1. Hard reject: heading TO Japan (inbound)
@@ -541,9 +549,16 @@ def detect_vessel(left_factory_date: str, leg: str = "nagoya",
     vessel = detect_vessel_scraper(left_factory_date, leg=leg, dest_country=dest_country,
                                    hub_port=hub_port, window_end=window_end)
     if vessel:
-        pos = get_vessel_position(vessel['mmsi'])
+        # Hand over the name detection already resolved, so the position lookup
+        # does not reject the vessel for lacking one.
+        pos = get_vessel_position(vessel['mmsi'], dest_country,
+                                  known_name=vessel.get('name', ''))
         if pos:
             vessel.update(pos)
+        else:
+            print(f"[detect_vessel] position lookup rejected MMSI {vessel.get('mmsi')} "
+                  f"({vessel.get('name') or 'unnamed'}) — returning vessel without a "
+                  f"position; the map will stay empty.", file=sys.stderr)
     return vessel
 
 # ── Database ──────────────────────────────────────────────────────────────────
