@@ -2229,6 +2229,49 @@ TRACKER_PAGE = BASE + """
     </script>
     {% endif %}
 
+    {# ── The one active leg ───────────────────────────────────────────────────
+       Exactly one voyage is ever being detected, and `active.key` names the port
+       it DEPARTED from (same rule as the leg resolver in the script below: the
+       last vessel hub marked 'visited').
+
+       `active.row` is the stop that represents where the car is now, so the
+       Detect controls render on that row only. Previously every unvisited vessel
+       stop rendered its own controls keyed to that stop's OWN name — so on the
+       Malmo row you got id="date-malmo", while auto-detection was reading
+       overrides['zeebrugge']. Anything typed there went into a leg nothing reads.
+       Keying the controls off `active.key` guarantees the manual override and the
+       auto-detection address the same leg. #}
+    {% set active = namespace(key='nagoya', row='') %}
+    {% for d in delivs %}
+    {% set aloc = d.locationName | lower %}
+    {% if d.isVisited == 'visited' and d.destinationType in ['HUB','TRANSIT'] %}
+      {% if 'zeebrugge' in aloc %}{% set active.key = 'zeebrugge' %}
+      {% elif 'malmo' in aloc or 'malmö' in aloc %}{% set active.key = 'malmo' %}
+      {% elif 'sagunto' in aloc %}{% set active.key = 'sagunto' %}
+      {% elif 'livorno' in aloc %}{% set active.key = 'livorno' %}
+      {% elif 'bristol' in aloc or 'portbury' in aloc %}{% set active.key = 'portbury' %}
+      {% elif 'southampton' in aloc %}{% set active.key = 'southampton' %}
+      {% elif 'drammen' in aloc %}{% set active.key = 'drammen' %}
+      {% elif 'piraeus' in aloc %}{% set active.key = 'piraeus' %}
+      {% elif 'gothenburg' in aloc or 'göteborg' in aloc %}{% set active.key = 'gothenburg' %}
+      {% endif %}
+    {% endif %}
+    {% endfor %}
+    {# Current position: the stop the car is AT, else the one it is en route to,
+       else the next one it has not reached. First match wins. #}
+    {% for d in delivs %}
+      {% if not active.row and d.isVisited == 'current' %}{% set active.row = d.locationName %}{% endif %}
+    {% endfor %}
+    {% for d in delivs %}
+      {% if not active.row and d.isVisited == 'inTransit' %}{% set active.row = d.locationName %}{% endif %}
+    {% endfor %}
+    {% for d in delivs %}
+      {% if not active.row and d.isVisited == 'notVisited'
+            and (d.transportMethod == 'Vessel' or d.destinationType in ['HUB','TRANSIT']) %}
+        {% set active.row = d.locationName %}
+      {% endif %}
+    {% endfor %}
+
     {% for d in delivs %}
     {% set v = d.isVisited %}
     {% set is_vessel = d.transportMethod == 'Vessel' or d.destinationType in ['FACTORY','HUB'] %}
@@ -2262,15 +2305,25 @@ TRACKER_PAGE = BASE + """
           {% elif v in ['inTransit', 'current'] %}badge-current
           {% else %}badge-pending{% endif %}">{{ v }}</span>
       </div>
-      {# 'current' is the state Toyota reports for the stop the car is AT right now.
-         It must be treated like 'inTransit' everywhere — omitting it meant the
-         active hub rendered no Detect controls and no leg could be resolved. #}
-      {% if is_vessel and v in ['inTransit', 'current', 'notVisited'] %}
+      {# Controls render on the car's current position only, keyed to the active
+         leg — see the `active` namespace above for why they are not keyed to
+         this row's own location. #}
+      {# TRANSIT stops count too: Toyota labels Malmo → Paldiski as 'Truck', but the
+         crossing is still a ship departure from Malmo, so the user needs the
+         controls there to correct the leg. #}
+      {% if d.locationName == active.row and (is_vessel or d.destinationType == 'TRANSIT') %}
+      {% set leg_key = active.key %}
       {% set step_date = order._step_dates.leftTheFactory if leg_key == 'nagoya' else
                          order._step_dates.get(leg_key, {}) if order._step_dates else {} %}
       {% set days_gap = (order._days_tracked // (order._logins - 1 if order._logins > 1 else 1)) if order._logins > 1 else 99 %}
       {% set date_reliable = order._logins >= 2 and days_gap <= 3 and order._lf_bounded %}
       <div style="margin:6px 0 2px 44px;">
+        {# Name the voyage explicitly. The controls sit on the current stop but
+           describe the leg INTO it, which departs from a different port. #}
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px;">
+          Voyage {{ 'Toyota City' if leg_key == 'nagoya' else leg_key|capitalize }}
+          → {{ d.locationName }} · departure date from {{ 'Toyota City' if leg_key == 'nagoya' else leg_key|capitalize }}
+        </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;">
           <input type="date" id="date-{{ leg_key }}"
                  placeholder="Departure date"
@@ -2958,58 +3011,10 @@ TRACKER_PAGE = BASE + """
     fetch('/api/vessel-overrides/'+hash)
       .then(r=>r.json())
       .then(function(overrides){
-        var leg = 'nagoya';
-        {% set prev_visited = namespace(loc='', is_vessel=false) %}
-        {% for d in delivs %}
-        {% set loc = d.locationName | lower %}
-        {% set is_vessel_hub = d.destinationType in ['HUB','TRANSIT'] and
-            ('zeebrugge' in loc or 'malmo' in loc or 'malmö' in loc or
-             'sagunto' in loc or 'livorno' in loc or 'bristol' in loc or
-             'portbury' in loc or 'southampton' in loc or 'drammen' in loc or
-             'piraeus' in loc) %}
-        {% if d.isVisited in ['inTransit', 'current'] %}
-          {# Hub is inTransit (car en route to it) or current (car sitting at it
-             right now) — either way this hub defines the active leg, so use it
-             directly. 'current' MUST be included: Toyota reports it for the stop
-             the car is presently at, and leaving it out dropped through to the
-             final else-branch below, which both failed to set a leg AND cleared
-             prev_visited — so `leg` stayed at its 'nagoya' initialiser and
-             detection scraped a months-old factory departure window. #}
-          {% if 'zeebrugge' in loc %}leg = 'zeebrugge';
-          {% elif 'malmo' in loc or 'malmö' in loc %}leg = 'malmo';
-          {% elif 'sagunto' in loc %}leg = 'sagunto';
-          {% elif 'livorno' in loc %}leg = 'livorno';
-          {% elif 'bristol' in loc or 'portbury' in loc %}leg = 'portbury';
-          {% elif 'southampton' in loc %}leg = 'southampton';
-          {% elif 'drammen' in loc %}leg = 'drammen';
-          {% elif 'piraeus' in loc %}leg = 'piraeus';
-          {% endif %}
-          {# Don't let a later notVisited stop re-derive and overwrite this. #}
-          {% set prev_visited.is_vessel = false %}
-        {% elif d.isVisited == 'visited' and is_vessel_hub %}
-          {# This hub was visited — remember it; the NEXT hub's state determines
-             whether the car is currently en route to it on a feeder vessel #}
-          {% set prev_visited.loc = loc %}
-          {% set prev_visited.is_vessel = true %}
-        {% elif d.isVisited == 'notVisited' and prev_visited.is_vessel %}
-          {# Previous hub was visited, this one is not yet — car is on a feeder
-             vessel between the previous hub and this one. Use the previous hub's
-             leg so we scrape departures from that hub's port. #}
-          {% set ploc = prev_visited.loc %}
-          {% if 'zeebrugge' in ploc %}leg = 'zeebrugge';
-          {% elif 'malmo' in ploc or 'malmö' in ploc %}leg = 'malmo';
-          {% elif 'sagunto' in ploc %}leg = 'sagunto';
-          {% elif 'livorno' in ploc %}leg = 'livorno';
-          {% elif 'bristol' in ploc or 'portbury' in ploc %}leg = 'portbury';
-          {% elif 'southampton' in ploc %}leg = 'southampton';
-          {% elif 'drammen' in ploc %}leg = 'drammen';
-          {% elif 'piraeus' in ploc %}leg = 'piraeus';
-          {% endif %}
-          {% set prev_visited.is_vessel = false %}{# only fire once #}
-        {% else %}
-          {% set prev_visited.is_vessel = false %}
-        {% endif %}
-        {% endfor %}
+        {# Same leg the Detect controls above are keyed to — computed once in the
+           `active` namespace so the manual override and auto-detection can never
+           address different legs. See that block for the full reasoning. #}
+        var leg = '{{ active.key }}';
 
         var legOverride = overrides[leg];
         // hasUserDate: depart_date must have been set BY THE USER (manual entry from
