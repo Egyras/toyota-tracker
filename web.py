@@ -236,19 +236,57 @@ def _detect_local(argv, timeout):
     if not _scraper_sem.acquire(timeout=20):
         print("[vessel scraper] all scraper slots busy, skipping", file=sys.stderr)
         return None
+    drop = _drop_priv_kwargs()
     try:
-        result = subprocess.run(
-            ['node', '/app/detect_vessel.js', *argv],
-            capture_output=True, text=True, timeout=timeout, env=env,
-            **_drop_priv_kwargs()
-        )
+        try:
+            result = subprocess.run(
+                ['node', '/app/detect_vessel.js', *argv],
+                capture_output=True, text=True, timeout=timeout, env=env, **drop
+            )
+        except PermissionError:
+            # Dropping to another user needs CAP_SETUID/CAP_SETGID. Under
+            # --cap-drop=ALL those are gone, so the setuid in the child fails with
+            # EPERM and nothing runs at all — the hardening defeats itself.
+            #
+            # The proper fix is to start the container as an unprivileged user
+            # (--user pwuser), which makes this drop unnecessary; see the scraper
+            # stage in the Jenkinsfile. This retry is the safety net for any
+            # deployment still combining root + --cap-drop=ALL: run the detector
+            # without dropping rather than failing outright, and say so.
+            if not drop:
+                raise
+            print("[vessel scraper] cannot drop to unprivileged user "
+                  "(CAP_SETUID/CAP_SETGID unavailable, likely --cap-drop=ALL). "
+                  "Running the browser as the current user instead — prefer "
+                  "starting the container with --user.", file=sys.stderr)
+            drop = {}
+            result = subprocess.run(
+                ['node', '/app/detect_vessel.js', *argv],
+                capture_output=True, text=True, timeout=timeout, env=env
+            )
     except subprocess.TimeoutExpired:
         print(f"[vessel scraper] timed out after {timeout}s", file=sys.stderr)
+        return None
+    except Exception as e:
+        # Catch-all on purpose. subprocess.run raises for a whole family of
+        # environment problems that have nothing to do with detection —
+        # FileNotFoundError if `node` is missing, PermissionError if the
+        # unprivileged user cannot exec it, KeyError from the user= drop, OSError
+        # on a read-only path. Letting those escape turned into a bare HTTP 500
+        # with an HTML body, which told the caller nothing and hid the real
+        # cause. Log it loudly, return None, let the caller degrade normally.
+        import traceback
+        print(f"[vessel scraper] FAILED to launch detector: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return None
     finally:
         _scraper_sem.release()
     if result.returncode != 0:
-        print(f"[vessel scraper] error: {result.stderr[:200]}", file=sys.stderr)
+        # stderr is where detect_vessel.js reports why, so give a useful amount
+        # of it rather than a 200-char stub.
+        print(f"[vessel scraper] detector exited {result.returncode}:\n"
+              f"{result.stderr[-2000:]}", file=sys.stderr)
         return None
     if not result.stdout.strip():
         return None
@@ -279,7 +317,16 @@ def _detect_remote(argv, timeout):
         print(f"[vessel scraper] scraper service unreachable: {e}", file=sys.stderr)
         return None
     if r.status_code != 200:
-        print(f"[vessel scraper] scraper service returned {r.status_code}: {r.text[:200]}",
+        # Surface the scraper's own diagnosis when it sends one. Truncating to
+        # 200 chars previously clipped a Flask HTML error page down to its
+        # doctype, which is why this looked like a mystery rather than a bug.
+        detail = r.text
+        try:
+            j = r.json()
+            detail = j.get("detail") or j.get("error") or r.text
+        except ValueError:
+            detail = "(non-JSON body — check `docker logs toyota-scraper`) " + r.text[:200]
+        print(f"[vessel scraper] scraper service returned {r.status_code}: {detail}",
               file=sys.stderr)
         return None
     try:
@@ -3852,7 +3899,16 @@ def internal_detect():
             return jsonify(error="bad argument"), 400
 
     timeout = 60 if date_or_dummy == "dummy" else 120
-    return jsonify(result=_detect_local(argv, timeout))
+    # Never let an exception here become Flask's HTML 500 page: the caller parses
+    # JSON, so an HTML body is doubly useless — it fails to parse AND carries no
+    # diagnosis. Return structured JSON and put the detail in the log.
+    try:
+        return jsonify(result=_detect_local(argv, timeout))
+    except Exception as e:
+        import traceback
+        print(f"[internal_detect] unhandled: {type(e).__name__}: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return jsonify(error="detector_failed", detail=f"{type(e).__name__}: {e}"), 500
 
 
 @app.route("/vendor/leaflet/<path:filename>")

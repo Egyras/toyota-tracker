@@ -103,19 +103,34 @@ pipeline {
                     # ── Scraper ───────────────────────────────────────────────
                     # Holds the MyShipTracking login and nothing else: no volume,
                     # no DB_PATH, no published port, no Toyota credentials.
+                    #
+                    # --user pwuser: the container is unprivileged from PID 1, so
+                    # Chromium can sandbox and nothing needs to setuid. An earlier
+                    # version ran as root and had web.py drop privileges per
+                    # subprocess — which fails with EPERM under --cap-drop=ALL,
+                    # because dropping to another user needs CAP_SETUID/SETGID.
+                    # Starting unprivileged avoids needing the capability at all.
+                    #
+                    # tmpfs needs mode=1777: Docker's default is root-owned, and
+                    # pwuser must be able to write both /tmp and its HOME or
+                    # Chromium will not start. /tmp is deliberately NOT noexec —
+                    # with --disable-dev-shm-usage Chromium maps shared memory
+                    # there, and noexec breaks it in ways that are hard to read
+                    # from the logs.
                     docker run -d \
                         --name    toyota-scraper \
                         --restart unless-stopped \
                         --init \
                         --ipc=host \
                         --network toyota-egress \
+                        --user    pwuser \
                         --cap-drop=ALL \
                         --security-opt no-new-privileges \
                         --pids-limit 512 \
                         --memory 2g \
                         --read-only \
-                        --tmpfs /tmp:rw,noexec,nosuid,size=512m \
-                        --tmpfs /home/pwuser:rw,nosuid,size=256m \
+                        --tmpfs /tmp:rw,nosuid,size=512m,mode=1777 \
+                        --tmpfs /home/pwuser:rw,nosuid,size=256m,mode=1777 \
                         -e        ROLE=scraper \
                         -e        MST_EMAIL \
                         -e        MST_PASSWORD \
