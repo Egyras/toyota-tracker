@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Toyota Order Tracker — Flask web wrapper with anonymized stats collection."""
-import os, sys, json, sqlite3, subprocess
+import os, sys, json, sqlite3, subprocess, threading, time, hmac, secrets
+from collections import defaultdict, deque
 from datetime import datetime, timedelta
-from flask import Flask, render_template_string, request, g, jsonify
+from flask import Flask, render_template_string, request, g, jsonify, send_from_directory
 
 app = Flask(__name__)
 
@@ -11,6 +12,79 @@ PASSWORD     = os.environ.get("TOYOTA_PASSWORD", "")
 DB_PATH      = os.environ.get("DB_PATH", "/data/stats.db")
 MST_EMAIL    = os.environ.get("MST_EMAIL", "")
 MST_PASSWORD = os.environ.get("MST_PASSWORD", "")
+
+# Set BEHIND_TRUSTED_PROXY=0 if the app is ever exposed directly instead of via
+# the Cloudflare tunnel — see client_key() for why this matters.
+BEHIND_TRUSTED_PROXY = os.environ.get("BEHIND_TRUSTED_PROXY", "1") == "1"
+# Vendored browser assets (see Dockerfile). Serving Leaflet ourselves keeps
+# script-src free of third-party origins.
+VENDOR_DIR = os.environ.get("VENDOR_DIR", "/app/node_modules")
+
+
+# ── Abuse controls ────────────────────────────────────────────────────────────
+# /api/vessel-detect spawns a headless Chromium via detect_vessel.js with a
+# 120 s timeout. Unauthenticated and unthrottled, a handful of concurrent
+# requests is enough to exhaust the box, so it needs both a per-client limit
+# and a hard ceiling on how many scrapers can ever run at once.
+
+# Only ever this many scraper subprocesses concurrently, process-wide. This is
+# the backstop that cannot be evaded by forging client identity.
+SCRAPER_SLOTS = int(os.environ.get("SCRAPER_SLOTS", "2"))
+_scraper_sem  = threading.BoundedSemaphore(SCRAPER_SLOTS)
+
+_rate_lock    = threading.Lock()
+_rate_hits    = defaultdict(deque)   # client key -> deque of request timestamps
+
+
+def client_key():
+    """Best-effort caller identity for rate limiting.
+
+    Production sits behind a Cloudflare tunnel, so request.remote_addr is the
+    tunnel's address and is identical for every visitor — limiting on it alone
+    would throttle all users as if they were one. CF-Connecting-IP is set by
+    Cloudflare and cannot be forged by the client when the origin is only
+    reachable through the tunnel.
+
+    A caller who reaches the origin directly could spoof these headers, which is
+    why the global semaphore above, not this function, is the real ceiling.
+    """
+    if BEHIND_TRUSTED_PROXY:
+        cf = request.headers.get("CF-Connecting-IP")
+        if cf:
+            return cf.strip()
+        xff = request.headers.get("X-Forwarded-For", "")
+        if xff:
+            return xff.split(",")[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def rate_limited(max_hits, per_seconds):
+    """Sliding-window limiter. Returns 429 JSON, which the frontend already
+    treats as a failed detection and degrades to the manual-entry prompt."""
+    def decorator(fn):
+        def wrapper(*args, **kwargs):
+            key = f"{fn.__name__}:{client_key()}"
+            now = time.monotonic()
+            with _rate_lock:
+                hits = _rate_hits[key]
+                while hits and hits[0] <= now - per_seconds:
+                    hits.popleft()
+                if len(hits) >= max_hits:
+                    retry = int(per_seconds - (now - hits[0])) + 1
+                    resp = jsonify(error="rate_limited",
+                                   message=f"Too many requests. Try again in {retry}s.")
+                    resp.status_code = 429
+                    resp.headers["Retry-After"] = str(retry)
+                    return resp
+                hits.append(now)
+                # Opportunistic cleanup so the dict cannot grow without bound.
+                if len(_rate_hits) > 4096:
+                    for k in [k for k, v in _rate_hits.items() if not v]:
+                        del _rate_hits[k]
+            return fn(*args, **kwargs)
+        wrapper.__name__ = fn.__name__
+        return wrapper
+    return decorator
 
 # Known Toyota Europe-route car carriers (K-Line HIGHWAY + NYK LEADER)
 # These regularly serve Nagoya/Yokkaichi → Singapore → Suez → Zeebrugge → Nordic
@@ -218,10 +292,20 @@ def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya",
         env = os.environ.copy()
         env['MST_EMAIL']    = MST_EMAIL
         env['MST_PASSWORD'] = MST_PASSWORD
-        result = subprocess.run(
-            ['node', '/app/detect_vessel.js', left_factory_date, '', leg, dest_country or '', hub_port or ''],
-            capture_output=True, text=True, timeout=120, env=env
-        )
+        # Hard ceiling on concurrent Chromium instances. Waiting rather than
+        # failing keeps normal single-user page loads working unchanged; the
+        # short timeout means a saturated queue degrades to "not detected"
+        # instead of piling up processes.
+        if not _scraper_sem.acquire(timeout=20):
+            print("[vessel scraper] all scraper slots busy, skipping", file=sys.stderr)
+            return None
+        try:
+            result = subprocess.run(
+                ['node', '/app/detect_vessel.js', left_factory_date, '', leg, dest_country or '', hub_port or ''],
+                capture_output=True, text=True, timeout=120, env=env
+            )
+        finally:
+            _scraper_sem.release()
         if result.returncode != 0:
             print(f"[vessel scraper] error: {result.stderr[:200]}", file=sys.stderr)
             return None
@@ -1783,6 +1867,14 @@ TRACKER_PAGE = BASE + """
     <h1>Toyota Europe Order Tracker</h1>
     <p class="sub">Know exactly where your car is — from the factory floor in Japan to your dealer's door.</p>
 
+    {# A rejected login (CSRF mismatch, or too many attempts) leaves username
+       empty, so it lands on this branch rather than the elif-error branch
+       below. Without this the request was refused completely silently and the
+       page just reappeared with no explanation. #}
+    {% if error %}
+    <div class="alert" style="margin-bottom:1rem;">⚠ {{ error }}</div>
+    {% endif %}
+
     <div class="benefits">
       <div class="benefit">
         <div class="benefit-icon">📍</div>
@@ -1808,6 +1900,7 @@ TRACKER_PAGE = BASE + """
 
     <div class="card">
       <form method="POST" id="login-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="form-group">
           <label>Email address</label>
           <input type="email" name="username" id="inp-email" placeholder="your@email.com" required autofocus>
@@ -1870,15 +1963,20 @@ TRACKER_PAGE = BASE + """
 
     <div class="privacy">
       <div class="privacy-title">🔒 How your credentials are handled</div>
-      <p>Your credentials go directly to Toyota's API at <code>ssoms.toyota-europe.com</code>
-         — never written to disk, never logged, never stored on our server.</p>
-      <p>Only anonymized stats are saved: model, step, country, delay flag.
-         No name, email, or order ID is stored. See
+      <p>Your email and password are sent to this server, which passes them straight to
+         Toyota's API at <code>ssoms.toyota-europe.com</code> to authenticate you. They are
+         held in memory for the duration of the request only — never saved to our database
+         and never written to a log.</p>
+      <p>Only anonymized stats are stored: model, step, country, delay flag, and a one-way
+         hash of your order ID. Your name, email and password are never stored. Toyota's own
+         order-status files, which contain your raw order ID, are cached on the server so
+         step dates can be tracked over time. See
          <a href="https://github.com/Egyras/toyota-tracker/blob/main/web.py" target="_blank">
          save_stats()</a> in the source code.</p>
-      <p>If you enable <strong>auto-refresh</strong>, your email and password are saved in your
-         browser's <code>sessionStorage</code> — local to this tab only, never sent to our server,
-         and automatically cleared when you close the tab.</p>
+      <p>If you enable <strong>auto-refresh</strong>, your email and password are also kept in
+         your browser's <code>sessionStorage</code> so the page can re-submit them every two
+         hours. They are cleared when you close the tab. If you would rather they were not
+         held in the browser at all, leave auto-refresh off and log in manually.</p>
     </div>
   </div>
 
@@ -2071,8 +2169,10 @@ TRACKER_PAGE = BASE + """
   </div>
 
   {% if delivs %}
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  {# Served from our own origin (see /vendor/leaflet) so the CSP can forbid
+     third-party script entirely — this page holds credentials in sessionStorage. #}
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css"/>
+  <script src="/vendor/leaflet/leaflet.js"></script>
   <div class="card">
     <div class="card-title">Delivery route</div>
 
@@ -3533,6 +3633,86 @@ document.querySelectorAll('.utc-time').forEach(function(el) {
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+@app.route("/vendor/leaflet/<path:filename>")
+def vendor_leaflet(filename):
+    """Serve Leaflet from our own origin.
+
+    It used to load from unpkg with no Subresource Integrity. Any compromise or
+    version-hijack of that CDN would have executed script on a page that holds a
+    My Toyota password in sessionStorage — a complete credential-theft path
+    through a dependency we do not control. Serving it ourselves lets the CSP
+    below forbid third-party script origins outright, which is stronger than SRI
+    because there is no external origin left to trust.
+    """
+    return send_from_directory(os.path.join(VENDOR_DIR, "leaflet", "dist"), filename,
+                               max_age=86400)
+
+
+# Content-Security-Policy.
+#
+# 'unsafe-inline' is required for scripts: the templates rely heavily on inline
+# <script> blocks and inline handlers (onclick=, onfocus=), and removing those
+# would be a rewrite, not a hardening pass. It is a real weakening, so the value
+# here comes from the other directives rather than script-src:
+#   connect-src 'self'  — every fetch() in the app is same-origin, so injected
+#                         script cannot POST stolen credentials anywhere.
+#   img-src             — pinned to the map tile host, closing the classic
+#                         "exfiltrate via new Image().src" trick.
+#   form-action 'self'  — the login form cannot be repointed at another origin.
+#   frame-ancestors     — no clickjacking of the credential form.
+CSP = "; ".join([
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com",
+    "img-src 'self' data: blob: https://*.basemaps.cartocdn.com",
+    "connect-src 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+    "object-src 'none'",
+])
+
+
+@app.after_request
+def security_headers(resp):
+    resp.headers.setdefault("Content-Security-Policy", CSP)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("Permissions-Policy",
+                            "geolocation=(), microphone=(), camera=(), interest-cohort=()")
+    # Only meaningful over TLS; the Cloudflare tunnel terminates HTTPS.
+    if request.is_secure or request.headers.get("X-Forwarded-Proto") == "https":
+        resp.headers.setdefault("Strict-Transport-Security",
+                                "max-age=31536000; includeSubDomains")
+    return resp
+
+
+# ── CSRF (double-submit cookie) ───────────────────────────────────────────────
+# Deliberately not Flask sessions: those need a persistent SECRET_KEY, and a
+# missing or rotating one is its own failure mode. Double-submit needs no server
+# state and no key. Applied only to POST / — the endpoint that forwards
+# credentials to Toyota. The /api/* routes are all same-origin GETs whose only
+# write requires already knowing an unguessable order_hash, so a token there
+# would add breakage risk without closing anything.
+CSRF_COOKIE = "tr_csrf"
+
+
+def issue_csrf():
+    token = request.cookies.get(CSRF_COOKIE)
+    if not token or len(token) < 32:
+        token = secrets.token_urlsafe(32)
+    g.csrf_token = token
+    return token
+
+
+def csrf_ok():
+    cookie = request.cookies.get(CSRF_COOKIE, "")
+    form   = request.form.get("csrf_token", "")
+    return bool(cookie) and bool(form) and hmac.compare_digest(cookie, form)
+
+
 @app.route("/", methods=["GET", "POST"])
 def index():
     username = USERNAME
@@ -3540,20 +3720,58 @@ def index():
     orders   = []
     error    = None
 
-    if request.method == "POST":
-        username = request.form.get("username", "")
-        password = request.form.get("password", "")
+    csrf_token = issue_csrf()
 
-    if username and password:
+    if request.method == "POST":
+        # The app forwards these straight to Toyota's auth endpoint, so without a
+        # limit it doubles as an open credential-stuffing proxy against
+        # ssoms.toyota-europe.com. Generous enough that a real person retyping a
+        # password never notices.
+        now = time.monotonic()
+        lkey = f"login:{client_key()}"
+        with _rate_lock:
+            hits = _rate_hits[lkey]
+            while hits and hits[0] <= now - 300:
+                hits.popleft()
+            if len(hits) >= 10:
+                error = "Too many login attempts. Please wait a few minutes and try again."
+            else:
+                hits.append(now)
+
+        if not error and not csrf_ok():
+            # Cross-origin form post, or a page loaded before this cookie existed.
+            error = "Your session expired or the request came from an untrusted page. Please reload and try again."
+
+        if not error:
+            username = request.form.get("username", "")
+            password = request.form.get("password", "")
+
+    if not error and username and password:
         try:
             sys.path.insert(0, '/app')
             from toyota import ToyotaSession
 
-            # Run --store-dates first so dates file is up to date before we read it
+            # Run --store-dates first so dates file is up to date before we read it.
+            #
+            # SECURITY: this used to pass --username/--password as argv, which
+            # puts every user's My Toyota password into /proc/<pid>/cmdline —
+            # world-readable inside the container, including by the headless
+            # Chromium the vessel scraper runs. toyota.py has no env/stdin option
+            # for credentials, so we invoke its importable main() through a tiny
+            # wrapper and hand the values over in the environment instead
+            # (/proc/<pid>/environ is readable only by the owning user and root).
+            # Same interpreter, same cwd=/data, same --store-dates behaviour, so
+            # the JSON date files land exactly where the reader below expects.
+            _cred_env = os.environ.copy()
+            _cred_env["TOYOTA_TRACKER_U"] = username
+            _cred_env["TOYOTA_TRACKER_P"] = password
             subprocess.run(
-                [sys.executable, "/app/toyota.py", "--username", username,
-                 "--password", password, "--store-dates"],
-                capture_output=True, text=True, timeout=60, cwd="/data"
+                [sys.executable, "-c",
+                 "import os,sys; sys.path.insert(0,'/app'); import toyota; "
+                 "toyota.main(os.environ['TOYOTA_TRACKER_U'], "
+                 "os.environ['TOYOTA_TRACKER_P'], True)"],
+                capture_output=True, text=True, timeout=60, cwd="/data",
+                env=_cred_env
             )
 
             session = ToyotaSession(username, password)
@@ -3653,11 +3871,22 @@ def index():
         except Exception as e:
             error = str(e)
 
-    return render_template_string(TRACKER_PAGE,
-                                  orders=orders, username=username,
-                                  error=error, request=request)
+    resp = app.make_response(
+        render_template_string(TRACKER_PAGE,
+                               orders=orders, username=username,
+                               error=error, request=request,
+                               csrf_token=csrf_token))
+    # HttpOnly is deliberately NOT set: the double-submit pattern needs the value
+    # readable only by our own server-rendered form, and the cookie carries no
+    # authority on its own — it is compared against the posted field, nothing more.
+    resp.set_cookie(CSRF_COOKIE, csrf_token, samesite="Lax",
+                    secure=(request.is_secure or
+                            request.headers.get("X-Forwarded-Proto") == "https"),
+                    max_age=60 * 60 * 12, path="/")
+    return resp
 
 @app.route("/api/vessel/<mmsi>")
+@rate_limited(max_hits=20, per_seconds=60)
 def api_vessel(mmsi):
     if mmsi not in TOYOTA_CARRIERS and not mmsi.isdigit():
         return jsonify(error="invalid mmsi"), 400
@@ -3704,6 +3933,7 @@ def enrich_with_route(db, resp, order_hash, leg):
 
 
 @app.route("/api/vessel-detect/<order_hash>", methods=["GET", "POST"])
+@rate_limited(max_hits=20, per_seconds=60)
 def api_vessel_detect(order_hash):
     db = get_db()
     body = request.get_json(silent=True) or {}

@@ -21,10 +21,17 @@ RUN pip install --no-cache-dir requests flask
 
 # Install Node Playwright locally in /app so require('playwright') works
 WORKDIR /app
+# leaflet is vendored (not pulled from a CDN at runtime) so the page's
+# Content-Security-Policy can forbid third-party script origins outright.
+# Served by the /vendor/leaflet route in web.py.
 RUN npm init -y \
-    && npm install playwright playwright-extra playwright-extra-plugin-stealth \
+    && npm install playwright playwright-extra playwright-extra-plugin-stealth leaflet@1.9.4 \
     && npx playwright install chromium \
     && npx playwright install-deps chromium
+
+# Fail the build rather than ship an image whose map silently 404s.
+RUN test -f /app/node_modules/leaflet/dist/leaflet.js \
+    && test -f /app/node_modules/leaflet/dist/leaflet.css
 
 # Copy app files
 COPY web.py /app/web.py
