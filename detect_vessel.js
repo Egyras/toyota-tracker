@@ -818,14 +818,111 @@ if(MMSI){
         // earlier version guessed at a DESTINATION: field that turned out never
         // to match, and the whole check ran on a fallback that penalised every
         // candidate equally. This just prints — no scoring, no assumptions.
-        var VU = vtext.toUpperCase();
-        var destContext = "";
-        var idx = VU.indexOf("DESTINATION");
-        if(idx >= 0){
-          destContext = VU.slice(idx, Math.min(idx+140, VU.length)).replace(/\s+/g, " ");
+        // ── Last Trips: the actual voyages this ship has run ────────────────
+        // The vessel page has a "Last Trips" table with columns
+        //   Origin | Departure | Destination | Arrival | Distance
+        // Every row is an OBSERVED voyage: real departure and arrival ports
+        // with real timestamps. If the top row is "this hub -> next hub" on
+        // dates that match our window, that IS our ship — no AIS destination
+        // guessing needed.
+        //
+        // The other checks below (europeScore, page-destination string, live
+        // AIS destination) only see what the ship is currently declaring, which
+        // for a berth-idling vessel is often the previous port or a stale
+        // rotation. Last Trips shows what actually happened.
+        try {
+          var trips = await pg.evaluate(function(){
+            var out = [];
+            var headings = document.querySelectorAll("h1, h2, h3, h4, h5, div, span, p");
+            for(var hi=0; hi<headings.length; hi++){
+              if(!/last\s*trips/i.test(headings[hi].textContent || "")) continue;
+              // Find the nearest following table
+              var node = headings[hi], depth = 0, table = null;
+              while(node && depth++ < 200){
+                node = node.nextElementSibling || (node.parentNode && node.parentNode.nextElementSibling);
+                if(!node) break;
+                if(node.tagName === "TABLE"){ table = node; break; }
+                var t = node.querySelector && node.querySelector("table");
+                if(t){ table = t; break; }
+              }
+              if(!table) continue;
+              var rows = table.querySelectorAll("tbody tr");
+              for(var ri=0; ri<rows.length; ri++){
+                var cells = rows[ri].querySelectorAll("td");
+                if(cells.length < 4) continue;
+                out.push({
+                  origin: (cells[0].innerText || "").trim(),
+                  depart: (cells[1].innerText || "").trim(),
+                  dest:   (cells[2].innerText || "").trim(),
+                  arrive: (cells[3].innerText || "").trim(),
+                });
+              }
+              break;
+            }
+            return out;
+          });
+          if(trips && trips.length){
+            m.lastTrips = trips.slice(0, 5);
+            process.stderr.write(m.vessel+": last trips (top "+m.lastTrips.length+"): "+
+              m.lastTrips.map(function(t){ return t.origin+"->"+t.dest+" "+t.depart; }).join(" | ")+"\n");
+          } else {
+            process.stderr.write(m.vessel+": no Last Trips table found\n");
+          }
+
+          // Decisive match: any recent trip whose origin matches THIS leg's hub
+          // and destination matches the NEXT hub, on dates inside our window.
+          // A voyage that already happened is not a guess.
+          if(NEXT_HUB && trips && trips.length && HUB_PORT){
+            var hubUp = HUB_PORT.toUpperCase();
+            for(var ti=0; ti<trips.length; ti++){
+              var tr = trips[ti];
+              var oU = (tr.origin||"").toUpperCase();
+              var dU = (tr.dest||"").toUpperCase();
+              if(oU.indexOf(hubUp) < 0 || dU.indexOf(NEXT_HUB) < 0) continue;
+              // Origin/destination line up. Check the departure date is inside
+              // our window — if it is, this ship literally did the trip.
+              var td = Date.parse((tr.depart||"").replace(" ", "T")+"Z");
+              if(!isFinite(td)) continue;
+              if(td >= (start*1000) - 12*3600000 && td <= (end*1000) + 12*3600000){
+                process.stderr.write(m.vessel+": Last Trips row proves "+hubUp+"->"+NEXT_HUB+
+                  " on "+tr.depart+" — this IS the ship, +100\n");
+                m.europeScore += 100;
+                m.provenCarrier = true;
+                m.provenDeparture = tr.depart;
+                break;
+              }
+            }
+          }
+        } catch(tripsErr){
+          process.stderr.write(m.vessel+": Last Trips lookup failed: "+tripsErr.message+"\n");
         }
-        process.stderr.write(m.vessel+": page destination context = "+
-                             (destContext || "(no 'DESTINATION' on page)")+"\n");
+
+        // Read the destination from MyShipTracking's vessel page. Layout is:
+        //   DESTINATION  ARRIVAL  DISTANCE  <PORT>  <YEAR>
+        // Kept as a soft signal for cases where Last Trips is empty or the
+        // ship has not yet made the observed run — never load-bearing on its
+        // own, because that AIS field lags heavily.
+        var VU = vtext.toUpperCase();
+        var pageDest = '';
+        var dm = VU.match(/DESTINATION\s+ARRIVAL\s+DISTANCE\s+([A-Z][A-Z0-9 .'\/-]{2,40})/);
+        if(dm){
+          var raw = dm[1].trim();
+          // Cut at the next standalone number (the year that follows the port).
+          var cut = raw.match(/^([A-Z][A-Z .'\/-]+?)(?=\s+\d{4}\b|\s+---)/);
+          pageDest = (cut ? cut[1] : raw.split(/\s+\d/)[0]).trim();
+        }
+        m.pageDest = pageDest;
+        process.stderr.write(m.vessel+": page destination = "+(pageDest || "(none / ---)")+"\n");
+        if(NEXT_HUB && pageDest){
+          if(pageDest.indexOf(NEXT_HUB) >= 0){
+            process.stderr.write(m.vessel+": destination IS the next hub ("+NEXT_HUB+") +30\n");
+            m.europeScore += 30; m.nextHubMatch = true;
+          } else if(IS_FEEDER_LEG){
+            process.stderr.write(m.vessel+": destination "+pageDest+" is not the next hub ("+
+                                 NEXT_HUB+") -5\n");
+            m.europeScore -= 5;   // soft, since AIS destination fields lag heavily
+          }
+        }
         // Extract IMO from vessel page while we have it open (needed for berth verification)
         var imoMatch=vtext.match(/IMO[:\s#]*(\d{7})/i);
         if(imoMatch) { m.imo=imoMatch[1]; process.stderr.write(m.vessel+": IMO="+m.imo+"\n"); }
@@ -1089,11 +1186,31 @@ if(MMSI){
           // Both bounds inclusive with 12h slack, since MST times can be slightly off.
           var earliest = arrival - maxTransitMs - 12*3600*1000;
           var latest   = arrival + 12*3600*1000;
-          if(t >= earliest && t <= latest){
+          // Ships that departed AFTER the car reached the next hub cannot have
+          // carried it there. Small negative window (up to 12h) is tolerated
+          // because the two clocks — MST departure time and our observation of
+          // the car arriving — can slip a little.
+          // The only hard fact we have is: a ship that DEPARTED after the car
+          // arrived at the next hub cannot possibly have carried it. Anything
+          // else — "how many hours before is best" — is a guess about voyage
+          // duration that I have been wrong about repeatedly today. So we do
+          // exactly the elimination and no positive scoring: it lets the other
+          // signals (europeScore, berth confirmation, page destination) pick
+          // the winner among ships that were physically capable of the trip.
+          //
+          // The 6h slack is calibration: MST departure time and our observation
+          // of the car at the next hub come from different clocks, and a ship
+          // that departed 6h "after" arrival probably actually sailed just
+          // before it — but 12h+ is inarguable.
+          if(t > arrival + 6*3600*1000){
+            var hoursAfter = Math.round((t - arrival)/3600000);
+            process.stderr.write(mm.vessel+': departed '+mm.time+' — '+
+              hoursAfter+'h AFTER car reached next hub, cannot be the carrier -40\n');
+            mm.europeScore -= 40;
+          } else if(t >= earliest && t <= latest){
             var hoursBeforeArrival = Math.round((arrival - t)/3600000);
             process.stderr.write(mm.vessel+': departed '+mm.time+' ('+
-              hoursBeforeArrival+'h before car reached next hub) — plausible carrier +40\n');
-            mm.europeScore += 40;
+              hoursBeforeArrival+'h before car reached next hub) — plausible carrier\n');
             mm.plausibleCarrier = true;
           } else {
             var deltaH = Math.round((t - arrival)/3600000);
