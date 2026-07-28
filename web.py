@@ -729,7 +729,7 @@ def _save_hub_legs(db, order_hash: str, model: str, dest_country: str,
     for i in range(1, len(vessel_hubs) - 1):
         fh = vessel_hubs[i]
         th = vessel_hubs[i+1]
-        if fh["visited"] == "visited" and th["visited"] in ("visited", "inTransit"):
+        if fh["visited"] == "visited" and th["visited"] in ("visited", "inTransit", "current"):
             from_hub = fh["hub"]
             to_hub   = th["hub"]
             leg_key  = f"{from_hub.lower()}->{to_hub.lower()}"
@@ -740,6 +740,75 @@ def _save_hub_legs(db, order_hash: str, model: str, dest_country: str,
                 VALUES (?,?,?,?,?,?)
                 ON CONFLICT(order_hash, leg_key) DO NOTHING
             """, (order_hash, from_hub, to_hub, leg_key, model, dest_country))
+
+
+def get_current_stop_info(db, order_hash, deliveries):
+    """Return {'location','country','state','date'} for the stop the car is at NOW.
+
+    The order-progress timeline takes its LOCATION from Toyota's live
+    preprocessed.steps but its DATE from step_dates[step]['current'] — the date
+    the *order step* first became current. Those two move independently: the
+    inTransit step starts once at the first European hub and never restarts,
+    while the location advances Zeebrugge -> Malmo -> ... within that same step.
+    Result: the UI reads "Malmo ... current: 2026-07-20" when the car only
+    reached Malmo on 07-28.
+
+    This recovers the real per-stop date by replaying deliveries_json history and
+    finding the first check in which THIS stop held its current state.
+    """
+    if not order_hash or not deliveries:
+        return None
+
+    stop = next((d for d in deliveries if d.get("isVisited") == "current"), None)
+    if stop is None:
+        # Fall back to the last stop the car is en route to.
+        in_transit = [d for d in deliveries if d.get("isVisited") == "inTransit"]
+        stop = in_transit[-1] if in_transit else None
+    if stop is None:
+        return None
+
+    loc_name = stop.get("locationName") or ""
+    state    = stop.get("isVisited") or ""
+    if not loc_name:
+        return None
+    loc_key = loc_name.upper()
+
+    first_seen = None
+    try:
+        rows = db.execute("""
+            SELECT ts, deliveries_json FROM checks
+            WHERE order_hash=? AND deliveries_json IS NOT NULL
+            ORDER BY ts ASC
+        """, (order_hash,)).fetchall()
+    except Exception:
+        rows = []
+
+    for row in rows:
+        try:
+            stored = json.loads(row["deliveries_json"])
+        except Exception:
+            continue
+        if not isinstance(stored, list):
+            continue
+        for d in stored:
+            # deliveries_json is written with keys "loc"/"visited"; tolerate the
+            # raw API spelling too in case of older rows.
+            sloc = (d.get("loc") or d.get("locationName") or "").upper()
+            sstate = (d.get("visited") or d.get("isVisited") or "")
+            if sloc == loc_key and sstate == state:
+                first_seen = row["ts"][:10]
+                break
+        if first_seen:
+            break
+
+    if not first_seen:
+        return None
+    return {
+        "location": loc_name,
+        "country":  stop.get("countryName") or "",
+        "state":    state,
+        "date":     first_seen,
+    }
 
 
 def get_stats_data():
@@ -1914,8 +1983,17 @@ TRACKER_PAGE = BASE + """
                July 20 as "visited" when the car left in late May, just because nobody
                logged in until July to notice the transition) #}
             {% else %}
+            {# When this is the active step AND the car has since moved to a later
+               stop within the same step, 'current' is the date the STEP began —
+               not the date it reached the location shown above. Relabel so the
+               two dates can't be read as the same event. #}
+            {% set stop_moved = (s == 'current' and event == 'current'
+                                 and order._current_stop
+                                 and order._current_stop.date != date) %}
             <div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap;">
-              <div style="font-size:12px;color:var(--red);font-weight:500;">{{ event }}: {{ date }}</div>
+              <div style="font-size:12px;color:var(--red);font-weight:500;"
+                   {% if stop_moved %}title="When this stage began, at the first hub of the stage"{% endif %}>
+                {{ 'stage started' if stop_moved else event }}: {{ date }}</div>
               <div title="{{ rel_desc }}"
                    style="display:inline-flex;align-items:center;gap:4px;
                           background:{{ rel_bg }};border:1px solid {{ rel_border }};
@@ -1928,6 +2006,18 @@ TRACKER_PAGE = BASE + """
             </div>
             {% endif %}
             {% endfor %}
+            {# Per-stop date: when the car actually reached the location shown
+               above. Derived from deliveries history, so it advances every time
+               the car moves to a new hub — unlike the step-level date. #}
+            {% if s == 'current' and order._current_stop
+                  and order._current_stop.date != step_dates[step_name].get('current') %}
+            <div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap;">
+              <div style="font-size:12px;color:var(--red);font-weight:500;"
+                   title="First check in which {{ order._current_stop.location }} reported this state">
+                {{ 'at' if order._current_stop.state == 'current' else 'en route to' }}
+                {{ order._current_stop.location }} since: {{ order._current_stop.date }}</div>
+            </div>
+            {% endif %}
             {% if not rel_accurate %}
             <div style="margin-top:8px;padding:8px 10px;
                         background:rgba(229,0,26,0.06);
@@ -2114,7 +2204,12 @@ TRACKER_PAGE = BASE + """
                      'malmo' if 'Malmo' in d.locationName or 'Malmö' in d.locationName else
                      'bremerhaven' if 'Bremerhaven' in d.locationName else
                      'southampton' if 'Southampton' in d.locationName else
-                     'gothenburg' if 'Gothenburg' in d.locationName else 'nagoya' %}
+                     'gothenburg' if 'Gothenburg' in d.locationName else
+                     'sagunto' if 'Sagunto' in d.locationName else
+                     'livorno' if 'Livorno' in d.locationName else
+                     'portbury' if 'Portbury' in d.locationName or 'Bristol' in d.locationName else
+                     'drammen' if 'Drammen' in d.locationName else
+                     'piraeus' if 'Piraeus' in d.locationName else 'nagoya' %}
     <div class="route-item" style="flex-direction:column;align-items:stretch;gap:0;">
       <div style="display:flex;align-items:center;gap:12px;padding:2px 0;">
         <div class="route-icon">
@@ -2131,10 +2226,13 @@ TRACKER_PAGE = BASE + """
         </div>
         <span class="badge
           {% if v == 'visited' %}badge-visited
-          {% elif v == 'inTransit' %}badge-current
+          {% elif v in ['inTransit', 'current'] %}badge-current
           {% else %}badge-pending{% endif %}">{{ v }}</span>
       </div>
-      {% if is_vessel and v in ['inTransit', 'notVisited'] %}
+      {# 'current' is the state Toyota reports for the stop the car is AT right now.
+         It must be treated like 'inTransit' everywhere — omitting it meant the
+         active hub rendered no Detect controls and no leg could be resolved. #}
+      {% if is_vessel and v in ['inTransit', 'current', 'notVisited'] %}
       {% set step_date = order._step_dates.leftTheFactory if leg_key == 'nagoya' else
                          order._step_dates.get(leg_key, {}) if order._step_dates else {} %}
       {% set days_gap = (order._days_tracked // (order._logins - 1 if order._logins > 1 else 1)) if order._logins > 1 else 99 %}
@@ -2305,7 +2403,7 @@ TRACKER_PAGE = BASE + """
          Only hide when ALL hubs are visited or the car is at the dealer. #}
       {% set has_unvisited_hub = namespace(value=false) %}
       {% for d in (order.intermediateDeliveries or []) %}
-        {% if d.isVisited in ['notVisited', 'inTransit'] and d.destinationType in ['HUB','TRANSIT'] %}
+        {% if d.isVisited in ['notVisited', 'inTransit', 'current'] and d.destinationType in ['HUB','TRANSIT'] %}
           {% set has_unvisited_hub.value = true %}
         {% endif %}
       {% endfor %}
@@ -2836,8 +2934,14 @@ TRACKER_PAGE = BASE + """
              'sagunto' in loc or 'livorno' in loc or 'bristol' in loc or
              'portbury' in loc or 'southampton' in loc or 'drammen' in loc or
              'piraeus' in loc) %}
-        {% if d.isVisited == 'inTransit' %}
-          {# Hub currently inTransit — use it directly #}
+        {% if d.isVisited in ['inTransit', 'current'] %}
+          {# Hub is inTransit (car en route to it) or current (car sitting at it
+             right now) — either way this hub defines the active leg, so use it
+             directly. 'current' MUST be included: Toyota reports it for the stop
+             the car is presently at, and leaving it out dropped through to the
+             final else-branch below, which both failed to set a leg AND cleared
+             prev_visited — so `leg` stayed at its 'nagoya' initialiser and
+             detection scraped a months-old factory departure window. #}
           {% if 'zeebrugge' in loc %}leg = 'zeebrugge';
           {% elif 'malmo' in loc or 'malmö' in loc %}leg = 'malmo';
           {% elif 'sagunto' in loc %}leg = 'sagunto';
@@ -2847,6 +2951,8 @@ TRACKER_PAGE = BASE + """
           {% elif 'drammen' in loc %}leg = 'drammen';
           {% elif 'piraeus' in loc %}leg = 'piraeus';
           {% endif %}
+          {# Don't let a later notVisited stop re-derive and overwrite this. #}
+          {% set prev_visited.is_vessel = false %}
         {% elif d.isVisited == 'visited' and is_vessel_hub %}
           {# This hub was visited — remember it; the NEXT hub's state determines
              whether the car is currently en route to it on a feeder vessel #}
@@ -3436,6 +3542,11 @@ def index():
                 import hashlib
                 order_hash = hashlib.sha256(oid.encode()).hexdigest()[:16] if oid else ""
                 details['_order_hash'] = order_hash
+                # Real date the car reached the stop it is at NOW. The step-level
+                # date only records when the step began (at the FIRST hub), so it
+                # goes stale as the car moves between hubs inside the same step.
+                details['_current_stop'] = get_current_stop_info(
+                    get_db(), order_hash, details.get('intermediateDeliveries') or [])
                 # Load observed flags and determine if leftTheFactory date is bounded
                 # by a prior witnessed step (observed=1 step with earlier date).
                 # Unbounded = leftTheFactory was already completed on FIRST ever login
@@ -3751,25 +3862,43 @@ def api_vessel_detect(order_hash):
             hub_names = hub_map.get(leg_override, [])
             hub_date = None
             if hub_names:
-                # Look through checks for the first time this hub appeared visited
+                # Look through checks for the first time this hub appeared visited.
+                # NOTE: deliveries_json is WRITTEN with the key "visited" (see
+                # save_stats), not "isVisited". Reading only d["isVisited"] here
+                # always yielded "" — the status test never matched, hub_date
+                # stayed None, and every feeder-leg detection silently fell back
+                # to today's date. Accept both key spellings, as the location
+                # lookup on the line above already does.
+                #
+                # Also split the states by strength: 'current'/'visited' mean the
+                # car actually reached this hub, which is the departure window we
+                # want. 'inTransit' only means it is en route to the hub, so that
+                # date can be many days early — keep it as a fallback only.
                 checks = db.execute("""
                     SELECT ts, deliveries_json FROM checks
                     WHERE order_hash=? AND deliveries_json IS NOT NULL
                     ORDER BY ts ASC
                 """, (order_hash,)).fetchall()
+                hub_date_enroute = None
                 for check in checks:
                     try:
                         delivs = json.loads(check["deliveries_json"])
                         for d in (delivs if isinstance(delivs, list) else []):
                             loc = (d.get("loc") or d.get("locationName") or "").upper()
-                            visited = d.get("isVisited", "")
-                            if any(h in loc for h in hub_names) and visited in ('visited', 'current', 'inTransit'):
+                            visited = (d.get("visited") or d.get("isVisited") or "")
+                            if not any(h in loc for h in hub_names):
+                                continue
+                            if visited in ('current', 'visited'):
                                 hub_date = check["ts"][:10]  # YYYY-MM-DD
                                 break
+                            if visited == 'inTransit' and not hub_date_enroute:
+                                hub_date_enroute = check["ts"][:10]
                     except Exception:
                         pass
                     if hub_date:
                         break
+                if not hub_date:
+                    hub_date = hub_date_enroute
             if hub_date:
                 left_factory_date = hub_date
             else:
