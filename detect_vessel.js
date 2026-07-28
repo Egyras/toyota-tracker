@@ -661,12 +661,18 @@ if(MMSI){
   process.stderr.write("Departure window for "+LEG+" ("+windowSource+"): "+
     new Date(start*1000).toISOString().slice(0,10)+" .. "+
     new Date(end*1000).toISOString().slice(0,10)+" (anchor D="+D+")\n");
-  var u="https://www.myshiptracking.com/ports-arrivals-departures/?mmsi=&pid="+safeNum(pid)+"&type=2&time="+safeNum(start,12)+"_"+safeNum(end,12)+"&pp=200";
-  process.stderr.write("Port "+LEG+" (pid:"+pid+") URL: "+u+"\n");
-  await pg.goto(u,{timeout:30000});
-  await pg.waitForTimeout(6000);
-
-  var rows=await pg.evaluate(function(){
+  // ── Read the port listing, ALL pages ────────────────────────────────────────
+  // MyShipTracking paginates this table at 50 rows and ignores the &pp= hint.
+  // Only page 1 used to be read, so the search was silently capped at the 50
+  // most recent departures in the window — Zeebrugge alone does far more than
+  // that in a few days. Elbe Highway (Zeebrugge, 2026-07-25 14:15) sat on
+  // page 4 and was never seen, which no amount of tuning the date window could
+  // have fixed: the ship was in range the whole time, just past the cap.
+  //
+  // sort=TIME makes the ordering deterministic so paging is stable.
+  var PAGE_SIZE = 50;
+  var MAX_PAGES = parseInt(process.env.MST_MAX_PAGES || "12", 10);
+  var scrapeRows = function(){
     var tr=document.querySelectorAll("table tbody tr"),out=[];
     for(var i=0;i<tr.length;i++){
       var td=tr[i].querySelectorAll("td");
@@ -678,7 +684,37 @@ if(MMSI){
       if(vessel)out.push({time:time,vessel:vessel,mmsi:mmsi});
     }
     return out;
-  });
+  };
+
+  var rows=[], seenRow={};
+  for(var page=1; page<=MAX_PAGES; page++){
+    var u="https://www.myshiptracking.com/ports-arrivals-departures/?sort=TIME&page="+page+
+          "&pid="+safeNum(pid)+"&type=2&time="+safeNum(start,12)+"_"+safeNum(end,12);
+    if(page===1) process.stderr.write("Port "+LEG+" (pid:"+pid+") URL: "+u+"\n");
+    try{
+      await pg.goto(u,{timeout:30000});
+      await pg.waitForTimeout(page===1?6000:2500);
+    }catch(e){
+      process.stderr.write("page "+page+" failed to load: "+e.message+"\n");
+      break;
+    }
+    var pageRows = await pg.evaluate(scrapeRows);
+    // Duplicate rows mean we have run off the end and the site is re-serving the
+    // last page — stop rather than loop to MAX_PAGES pointlessly.
+    var added = 0;
+    for(var pr=0; pr<pageRows.length; pr++){
+      var key = pageRows[pr].mmsi+"|"+pageRows[pr].time;
+      if(seenRow[key]) continue;
+      seenRow[key] = true; rows.push(pageRows[pr]); added++;
+    }
+    process.stderr.write("  page "+page+": "+pageRows.length+" rows ("+added+" new, "+rows.length+" total)\n");
+    if(pageRows.length === 0 || added === 0) break;
+    if(pageRows.length < PAGE_SIZE) break;   // short page = last page
+    if(page === MAX_PAGES){
+      process.stderr.write("WARNING: hit MST_MAX_PAGES="+MAX_PAGES+"; there may be more "+
+        "departures in this window that were not examined.\n");
+    }
+  }
 
   var C=carriers;
   var knownMMSIs=Object.keys(TOYOTA_CARRIERS);
@@ -698,6 +734,20 @@ if(MMSI){
     return false;
   });
   process.stderr.write('Name filter: '+matches.length+' matches from '+rows.length+' total\n');
+
+  // Two different date windows both returning exactly 50 rows is a page-size cap,
+  // not a coincidence — the listing is paginated and we only ever read page one.
+  // When that happens the search is silently truncated: the right ship can be
+  // sitting at row 51 and no amount of fixing the window will surface it. Say so
+  // loudly, and dump what we DID see so the gap is visible rather than inferred.
+  var times = rows.map(function(r){ return r.time; }).filter(Boolean).sort();
+  process.stderr.write('Rows span: '+(times[0]||'?')+'  ..  '+(times[times.length-1]||'?')+'\n');
+  if(matches.length === 0){
+    // No candidates is the case where you need to see the raw list to tell
+    // "wrong window" from "right window, name filter too strict".
+    process.stderr.write('Vessels seen ('+rows.length+'): '+
+      rows.map(function(r){return r.vessel;}).join(', ')+'\n');
+  }
 
   // Always score ALL matches by Europe port history — even single match
   // This prevents false positives from carriers going to Americas/Asia/Pacific
