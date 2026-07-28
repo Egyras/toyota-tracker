@@ -812,6 +812,38 @@ if(MMSI){
         await pg.waitForTimeout(3000);
         var vtext=await pg.textContent("body");
         m.europeScore=EUROPE.filter(function(p){return vtext.toUpperCase().includes(p);}).length;
+
+        // ── Is this ship going where the CAR is going? ──────────────────────
+        // europeScore only counts how many European port names appear on the
+        // page, so a vessel idling at Bremerhaven scores well purely for being
+        // in Europe — that is how Triton Leader (5) beat Elbe Highway (3) on a
+        // Zeebrugge->Malmo leg. On a feeder leg the destination is known: it is
+        // the next hub on this car's route.
+        //
+        // This check lives here, on the vessel page every candidate already
+        // fetches, rather than on the live-position API. The earlier attempt was
+        // inside an `if(liveDestMatch)` branch whose regex almost never matches,
+        // so it silently never ran and the scores came back identical.
+        var VU = vtext.toUpperCase();
+        var destMatch = VU.match(/DESTINATION[:\s]*([A-Z][A-Z0-9 ,.'\/-]{2,40})/);
+        var pageDest = destMatch ? destMatch[1].trim() : '';
+        if(pageDest) process.stderr.write(m.vessel+": page destination="+pageDest+"\n");
+        if(NEXT_HUB){
+          // Match on the declared destination when we could read one; otherwise
+          // fall back to the port simply appearing on the page (weaker, so a
+          // smaller bonus).
+          if(pageDest && pageDest.indexOf(NEXT_HUB) >= 0){
+            process.stderr.write(m.vessel+": destination is the next hub ("+NEXT_HUB+") +30\n");
+            m.europeScore += 30; m.nextHubMatch = true;
+          } else if(!pageDest && VU.indexOf(NEXT_HUB) >= 0){
+            process.stderr.write(m.vessel+": next hub ("+NEXT_HUB+") appears on its page +10\n");
+            m.europeScore += 10;
+          } else if(pageDest && IS_FEEDER_LEG){
+            process.stderr.write(m.vessel+": destination "+pageDest+" is not the next hub ("+
+                                 NEXT_HUB+") -10\n");
+            m.europeScore -= 10;
+          }
+        }
         // Extract IMO from vessel page while we have it open (needed for berth verification)
         var imoMatch=vtext.match(/IMO[:\s#]*(\d{7})/i);
         if(imoMatch) { m.imo=imoMatch[1]; process.stderr.write(m.vessel+": IMO="+m.imo+"\n"); }
