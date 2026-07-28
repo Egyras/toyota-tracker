@@ -10,6 +10,9 @@ const HUB_PORT=(process.argv[6]||"").toUpperCase();      // intermediate hub por
 // Date the car was first seen at the NEXT hub. Optional; when present it closes
 // the far end of the departure window with an observation instead of a guess.
 const WINDOW_END=(process.argv[7]||"").trim();
+// Name of the NEXT hub on the car's route (e.g. MALMO when tracking the
+// Zeebrugge leg). On a feeder leg the correct ship is the one going there.
+const NEXT_HUB=(process.argv[8]||"").toUpperCase().trim();
 
 // ── URL component allowlists ─────────────────────────────────────────────────
 // Vessel names, MMSIs and IMOs are SCRAPED from myshiptracking.com, and the MMSI
@@ -838,6 +841,27 @@ if(MMSI){
           if(liveDestMatch){
             var liveDest=liveDestMatch[1].trim().replace(/^>/,"").toUpperCase();
             process.stderr.write(m.vessel+": live dest="+liveDest+"\n");
+
+            // On a feeder leg we know the destination: it is the next hub on the
+            // car's own route. That is a far sharper signal than europeScore,
+            // which only counts how many European port names appear on the
+            // vessel's page — so a ship idling at Bremerhaven scores well simply
+            // for being in Europe. Triton Leader (europeScore 5, at Bremerhaven)
+            // outranked Elbe Highway (3, bound for Malmo) on exactly that basis,
+            // despite Bremerhaven being nowhere on this car's route.
+            if(NEXT_HUB && liveDest.indexOf(NEXT_HUB) >= 0){
+              process.stderr.write(m.vessel+": destination matches the next hub ("+NEXT_HUB+
+                                   ") — this is the leg we are tracking, +30\n");
+              m.europeScore += 30;
+              m.nextHubMatch = true;
+            } else if(NEXT_HUB && liveDest && IS_FEEDER_LEG){
+              // A European port that is not this car's next hub means the ship is
+              // on a different rotation. Not fatal — AIS destination fields are
+              // often stale or free-text — but it should not outrank a match.
+              process.stderr.write(m.vessel+": dest "+liveDest+" is not the next hub ("+
+                                   NEXT_HUB+"), -10\n");
+              m.europeScore -= 10;
+            }
             var isOffRoute=OFF_ROUTE_DEST.some(function(d){return liveDest.indexOf(d)>=0;});
             if(isOffRoute){
               process.stderr.write(m.vessel+": off-route destination ("+liveDest+"), penalizing -20\n");

@@ -498,7 +498,7 @@ def _cache_vessel(db, order_hash: str, vessel: dict, leg: str = "nagoya"):
 
 def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya",
                           dest_country: str = "", hub_port: str = "",
-                          window_end: str = "") -> dict | None:
+                          window_end: str = "", next_hub: str = "") -> dict | None:
     """
     Detect vessel by scraping MyShipTracking port departures.
     leg: nagoya (default), zeebrugge, malmo, bremerhaven etc.
@@ -518,7 +518,7 @@ def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya",
     try:
         data = run_detector(
             [left_factory_date, '', leg, dest_country or '', hub_port or '',
-             window_end or ''], 120)
+             window_end or '', next_hub or ''], 120)
         if not data:
             return None
         matches = data.get('matches', [])
@@ -542,12 +542,12 @@ def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya",
 
 def detect_vessel(left_factory_date: str, leg: str = "nagoya",
                   dest_country: str = "", hub_port: str = "",
-                  window_end: str = "") -> dict | None:
+                  window_end: str = "", next_hub: str = "") -> dict | None:
     """Auto-detect vessel via MyShipTracking port departure scraper."""
     if not left_factory_date:
         return None
     vessel = detect_vessel_scraper(left_factory_date, leg=leg, dest_country=dest_country,
-                                   hub_port=hub_port, window_end=window_end)
+                                   hub_port=hub_port, window_end=window_end, next_hub=next_hub)
     if vessel:
         # Hand over the name detection already resolved, so the position lookup
         # does not reject the vessel for lacking one.
@@ -3915,11 +3915,11 @@ def internal_detect():
     body = request.get_json(silent=True) or {}
     argv = body.get("argv")
     # Positional contract with detect_vessel.js:
-    #   0 date | 1 mmsi | 2 leg | 3 dest_country | 4 hub_port | 5 window_end
+    #   0 date | 1 mmsi | 2 leg | 3 dest_country | 4 hub_port | 5 window_end | 6 next_hub
     # Keep this bound in step when adding arguments — it was left at 5 when
     # window_end was introduced, so every real request was rejected as
     # "bad argv" before it reached the browser.
-    ARGV_MAX = 6
+    ARGV_MAX = 7
     if not isinstance(argv, list) or not (2 <= len(argv) <= ARGV_MAX):
         return jsonify(error="bad argv",
                        detail=f"expected 2..{ARGV_MAX} elements, got "
@@ -4555,6 +4555,7 @@ def api_vessel_detect(order_hash):
     # the NEXT one. Find when the next stop after this leg's hub was first seen,
     # and hand that over as the far edge of the search.
     window_end = ""
+    next_hub = ""
     if leg_override not in ('nagoya', 'yokkaichi', 'hiroshima'):
         try:
             hub_names = {
@@ -4586,14 +4587,18 @@ def api_vessel_detect(order_hash):
                     state = (d.get("visited") or d.get("isVisited") or "")
                     if state in ('current', 'visited'):
                         window_end = r["ts"][:10]
+                        # Where the leg ENDS. The correct vessel is the one whose
+                        # AIS destination is this port — a much sharper signal
+                        # than "is it somewhere in Europe".
+                        next_hub = (d.get("loc") or d.get("locationName") or "")
                         break
                 if window_end:
                     break
         except Exception as e:
             print(f"[api_vessel_detect] window_end lookup failed: {e}", file=sys.stderr)
         print(f"[api_vessel_detect] leg={leg_override} anchor={left_factory_date} "
-              f"window_end={window_end or '(none — falling back to fixed span)'}",
-              file=sys.stderr)
+              f"window_end={window_end or '(none — falling back to fixed span)'} "
+              f"next_hub={next_hub or '(unknown)'}", file=sys.stderr)
 
     # Fetch order's destination country for region-aware reverse-lookup
     dest_row = db.execute(
@@ -4638,7 +4643,7 @@ def api_vessel_detect(order_hash):
             hub_port = 'LIVORNO'
 
     vessel = detect_vessel(left_factory_date, leg=leg_override, dest_country=dest_country,
-                           hub_port=hub_port, window_end=window_end)
+                           hub_port=hub_port, window_end=window_end, next_hub=next_hub)
     if not vessel:
         return jsonify(error="no vessel detected"), 404
 
