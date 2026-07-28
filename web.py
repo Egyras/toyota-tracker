@@ -2722,22 +2722,36 @@ TRACKER_PAGE = BASE + """
 
     // Show vessel only while car is actively at sea
     // Stop tracking once car left port depot (now on truck to dealer)
-    {% set show_vessel = order.currentStatus.currentStatus in ['LeftTheFactory','leftTheFactory','InTransit','inTransit'] or order._vessel_mmsi %}
-    {% if order.currentStatus.currentStatus in ['LeftTheDepot','leftTheDepot','ArrivedAtRetailer','arrivedAtRetailer','ArrivedInDestination','arrivedInDestination'] %}
-      {# Hide vessel for final states UNLESS there are still unvisited vessel hubs ahead.
-         LeftTheDepot at an intermediate hub (e.g. Zeebrugge) means the car is on a feeder
-         vessel heading to the next hub (Malmö) — vessel tracking should still show.
-         Only hide when ALL hubs are visited or the car is at the dealer. #}
-      {% set has_unvisited_hub = namespace(value=false) %}
-      {% for d in (order.intermediateDeliveries or []) %}
-        {% if d.isVisited in ['notVisited', 'inTransit', 'current'] and d.destinationType in ['HUB','TRANSIT'] %}
-          {% set has_unvisited_hub.value = true %}
-        {% endif %}
-      {% endfor %}
-      {% if not has_unvisited_hub.value %}
-        {% set show_vessel = false %}
+    {# Is there still a sea leg ahead of the car? #}
+    {% set has_unvisited_hub = namespace(value=false) %}
+    {% for d in (order.intermediateDeliveries or []) %}
+      {% if d.isVisited in ['notVisited', 'inTransit', 'current'] and d.destinationType in ['HUB','TRANSIT'] %}
+        {% set has_unvisited_hub.value = true %}
       {% endif %}
-    {% endif %}
+    {% endfor %}
+    {% set _status = order.currentStatus.currentStatus %}
+
+    {# Show the vessel section when:
+        - the car is at sea on the deep-sea leg (LeftTheFactory / InTransit), or
+        - we already have a cached vessel for it, or
+        - it has LeftTheDepot at an INTERMEDIATE hub and another hub is still
+          ahead — that means it is on a feeder vessel (e.g. Zeebrugge -> Malmo),
+          which is exactly when people most want to see the ship.
+
+       That third case was previously unreachable. show_vessel was initialised
+       from a list that does not contain LeftTheDepot (so: false), and the
+       has_unvisited_hub block below could only ever set it to false again —
+       never back to true. The comment claimed to handle the case; the code
+       could not. The whole vessel block, including the fetch that triggers
+       detection, was therefore never rendered for a car sitting mid-route, and
+       the symptom was silence: no /api/vessel-detect request, no error.
+
+       ArrivedAtRetailer / ArrivedInDestination stay hidden regardless — the car
+       is delivered, so remaining hubs are irrelevant. #}
+    {% set show_vessel =
+         _status in ['LeftTheFactory','leftTheFactory','InTransit','inTransit']
+         or order._vessel_mmsi
+         or (_status in ['LeftTheDepot','leftTheDepot'] and has_unvisited_hub.value) %}
     {% if show_vessel %}
     var vesselMarker = null;
     var vesselPulse = null;
