@@ -533,6 +533,10 @@ def detect_vessel_scraper(left_factory_date: str, leg: str = "nagoya",
                     'time':          m.get('time', ''),
                     'leg':           leg,
                     'berth_verified': data.get('berth_verified', False),
+                    # Close runners-up from the detector — surfaced to the UI so
+                    # the user sees "or Seine Highway" instead of a false-certain
+                    # single vessel when two plausible candidates tied.
+                    'alternates':    data.get('alternates') or [],
                 }
         return None
     except Exception as e:
@@ -2439,6 +2443,16 @@ TRACKER_PAGE = BASE + """
             </span>
           </div>
           <div class="vessel-card-name" id="vessel-name">—</div>
+          {# Populated by loadVessel() when the detector returned close runners-up.
+             Feeder legs frequently have two plausible carriers (e.g. Elbe Highway
+             and Seine Highway both did Zeebrugge->Malmo the same day) — showing
+             both is more honest than picking one arbitrarily. #}
+          <div id="vessel-alternates" style="display:none;font-size:12px;color:var(--muted);
+                                             margin-top:4px;line-height:1.5;">
+            or <span id="vessel-alternates-names"></span>
+            <span title="Two vessels scored within 5 points of each other on this leg. Toyota books cars on whichever carrier has capacity that day, so it could be either — the tracker cannot know from public data which one carried yours."
+                  style="cursor:help;color:var(--amber);">ⓘ</span>
+          </div>
           <div class="vessel-card-meta">
             <span class="vessel-meta-item">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px;">
@@ -2785,6 +2799,13 @@ TRACKER_PAGE = BASE + """
       var n = s.name || '';
       return n.split(',')[0].trim() || 'Hub';
     });
+    // Also expose route state so renderVoyageProgress can pick the ACTIVE
+    // segment (last visited -> next unvisited) rather than the geometrically
+    // nearest one. Without this, a ship past the current hub still reads
+    // "Zeebrugge -> Malmo 88%" instead of "Malmo -> Paldiski".
+    window.routeStops = stops.map(function(s){
+      return { name: s.name || '', visited: s.visited || 'notVisited' };
+    });
     if(latlngs.length > 1){
       L.polyline(latlngs,{color:'#e5001a',weight:2,dashArray:'6 6',opacity:.7}).addTo(map);
     }
@@ -2839,7 +2860,7 @@ TRACKER_PAGE = BASE + """
     {% if show_vessel %}
     var vesselMarker = null;
     var vesselPulse = null;
-    function loadVessel(mmsi, name, lat, lng, speed, course, dest, eta, ageMin, verified, departDate) {
+    function loadVessel(mmsi, name, lat, lng, speed, course, dest, eta, ageMin, verified, departDate, alternates) {
       // verified: true if MMSI in TOYOTA_CARRIERS (known carrier), false if name fits
       // a PCC pattern but MMSI is unknown (possibly new Toyota charter we haven't catalogued).
       // Default true if not passed (backward compat with direct calls).
@@ -2909,6 +2930,19 @@ TRACKER_PAGE = BASE + """
       if(skeleton) skeleton.style.display='none';
       if(card){
         document.getElementById('vessel-name').textContent = name;
+
+        // Runners-up. Hidden when the winner is unambiguous.
+        var altBox = document.getElementById('vessel-alternates');
+        var altNames = document.getElementById('vessel-alternates-names');
+        if (altBox && altNames) {
+          var list = (alternates && alternates.length) ? alternates : [];
+          if (list.length) {
+            altNames.textContent = list.map(function(a){ return a.name || ('MMSI '+a.mmsi); }).join(' or ');
+            altBox.style.display = 'block';
+          } else {
+            altBox.style.display = 'none';
+          }
+        }
         document.getElementById('vessel-speed').textContent = speed+' knots';
         document.getElementById('vessel-dest').textContent = dest||'—';
         document.getElementById('vessel-mmsi').textContent = mmsi;
@@ -3296,20 +3330,48 @@ TRACKER_PAGE = BASE + """
         segs.push({from:latlngs[i-1],to:latlngs[i],km:d,start:totalKm});
         totalKm+=d;
       }
-      // Find closest segment to vessel by min distance to either endpoint
-      var bestSeg=segs[0], bestD=Infinity;
-      for(var s of segs){
-        var d = Math.min(dist([lat,lng],s.from), dist([lat,lng],s.to));
-        if(d<bestD){bestD=d;bestSeg=s;}
+      // Choose the segment by ROUTE STATE, not geometry. window.routeStops[i].visited
+      // tells us where the car actually is; the active leg is the one from the last
+      // 'visited' stop to the first stop after it that is not yet visited. Falling
+      // back to nearest-endpoint (the old behaviour) picks the wrong segment as
+      // soon as the ship has moved past the current hub — that is why Elbe Highway
+      // sitting at Paldiski still showed "Zeebrugge -> Malmo 88%" instead of
+      // "Malmo -> Paldiski".
+      var fromIdx = -1;
+      if(window.routeStops && window.routeStops.length){
+        for(var i=0; i<window.routeStops.length-1; i++){
+          var here = window.routeStops[i].visited;
+          var next = window.routeStops[i+1].visited;
+          if(here === 'visited' && next !== 'visited'){ fromIdx = i; break; }
+        }
+        // Everything visited -> the car is at the dealer; show the last leg 100%.
+        if(fromIdx < 0){
+          for(var i2=window.routeStops.length-1; i2>=0; i2--){
+            if(window.routeStops[i2].visited === 'visited'){ fromIdx = Math.max(0, i2-1); break; }
+          }
+        }
       }
-      // Progress within best segment: how close to start vs end
-      var dFromStart=dist([lat,lng],bestSeg.from);
-      var dToEnd=dist([lat,lng],bestSeg.to);
+      if(fromIdx < 0){
+        // Old behaviour as last resort: whichever segment endpoint the ship is nearest to.
+        var bestSeg2=segs[0], bestD2=Infinity;
+        for(var s2 of segs){
+          var d2 = Math.min(dist([lat,lng],s2.from), dist([lat,lng],s2.to));
+          if(d2<bestD2){bestD2=d2; fromIdx=segs.indexOf(s2);}
+        }
+      }
+      var bestSeg = segs[fromIdx];
+      // Progress within the ACTIVE segment. If the ship is well past it (already
+      // beyond the segment end), pin to 100% rather than letting geometry read
+      // a nonsense number.
+      var dFromStart = dist([lat,lng], bestSeg.from);
+      var dToEnd     = dist([lat,lng], bestSeg.to);
       var segProgress = dFromStart/(dFromStart+dToEnd);
+      // "Past the end" heuristic: ship is much closer to the destination hub
+      // than to the segment, meaning it has arrived (dToEnd tiny) OR moved on
+      // to the next leg (dFromStart of the *next* segment small).
+      if(dToEnd < 20) segProgress = 1.0;   // within 20 km of arrival = arrived
       var traveledKm = bestSeg.start + bestSeg.km*segProgress;
       var pct = Math.max(0, Math.min(100, (traveledKm/totalKm)*100));
-      // Find hub names
-      var fromIdx = segs.indexOf(bestSeg);
       var toIdx = fromIdx + 1;
       var fromName = (window.routeHubs && window.routeHubs[fromIdx]) || 'Origin';
       var toName = (window.routeHubs && window.routeHubs[toIdx]) || 'Destination';
@@ -3400,7 +3462,7 @@ TRACKER_PAGE = BASE + """
                   var t = new Date(d.updated.replace(' ','T')+'Z');
                   if(!isNaN(t)) ageMin = Math.floor((Date.now()-t.getTime())/60000);
                 }
-                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin,d.verified,d.depart_date);
+                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin,d.verified,d.depart_date,d.alternates);
               } else if(d.error || !d.mmsi){
                 // Detection genuinely failed — no European-bound PCC matched.
                 // Show the carrier-unknown prompt so user can correct the date or enter MMSI.
@@ -3436,7 +3498,7 @@ TRACKER_PAGE = BASE + """
                   var t = new Date(d.updated.replace(' ','T')+'Z');
                   if(!isNaN(t)) ageMin = Math.floor((Date.now()-t.getTime())/60000);
                 }
-                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin,null,d.depart_date);
+                loadVessel(d.mmsi,d.name,d.lat,d.lon,d.speed,d.course,d.destination,d.eta,ageMin,null,d.depart_date,d.alternates);
               }
             })
             .catch(()=>{ if(skel2) skel2.style.display='none'; });

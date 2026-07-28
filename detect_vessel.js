@@ -848,23 +848,49 @@ if(MMSI){
           //   trips_dbg tables=N headers=[...]  → what tables were considered
           //   trips_dbg matched cols=[...]      → which one won and its headers
           var probe = await pg.evaluate(function(){
+            // Match must be STRICT: the four header cells must appear as
+            // separate <th>s in ONE row, and the values must equal the labels
+            // (not merely contain them as substrings). The previous, looser
+            // check happily matched a Port Calls table whose header ran
+            // "Port | Arrival | Departure | Time in port" — "ORIGIN" was
+            // nowhere in it, but "ARRIVAL" and "DEPARTURE" appeared and the
+            // scan settled for that. Elbe Highway winning was pure luck: the
+            // first data row was Malmo/Malmo/2026-07-27, columns 1 and 3 both
+            // read "MALMO", and my next-hub check passed on a coincidence.
             var HEADERS_WANT = ['ORIGIN','DEPARTURE','DESTINATION','ARRIVAL'];
             var tables = document.querySelectorAll('table');
             var seen = [], picked = null, colIx = null;
             for(var ti=0; ti<tables.length; ti++){
               var tb = tables[ti];
-              var hs = tb.querySelectorAll('thead th, thead td, tr:first-child th, tr:first-child td');
-              var hdr = [];
-              for(var hi=0; hi<hs.length; hi++) hdr.push((hs[hi].innerText||'').trim().toUpperCase());
-              seen.push(hdr.join('|'));
-              // Find where each wanted column sits in this table
-              var ix = {};
-              HEADERS_WANT.forEach(function(w){
-                for(var k=0;k<hdr.length;k++){ if(hdr[k].indexOf(w)>=0){ ix[w]=k; break; } }
-              });
-              if(ix.ORIGIN!=null && ix.DEPARTURE!=null && ix.DESTINATION!=null && ix.ARRIVAL!=null){
-                picked = tb; colIx = ix; break;
+              // Consider each row of the header separately, and only <th> — a
+              // <td> in the header area is data, not a label.
+              var rows = tb.querySelectorAll('thead tr, tr');
+              var rowHdrs = [];
+              for(var ri=0; ri<Math.min(rows.length, 3); ri++){
+                var ths = rows[ri].querySelectorAll('th');
+                if(!ths.length) continue;
+                var hdr = [];
+                for(var hi=0; hi<ths.length; hi++) hdr.push((ths[hi].innerText||'').trim().toUpperCase());
+                rowHdrs.push(hdr);
               }
+              // Cheap summary for diagnostics.
+              seen.push(rowHdrs.map(function(h){return h.join('|');}).join(' // ') || '(no <th> row)');
+              for(var rh=0; rh<rowHdrs.length; rh++){
+                var hdr2 = rowHdrs[rh];
+                var ix = {};
+                HEADERS_WANT.forEach(function(w){
+                  for(var k=0; k<hdr2.length; k++){
+                    // Strict: exact label match. Allows an extra column like
+                    // "Origin (port)" via startsWith, but not "TIME IN PORT"
+                    // matching "PORT".
+                    if(hdr2[k] === w || hdr2[k].indexOf(w+' ') === 0){ ix[w]=k; break; }
+                  }
+                });
+                if(ix.ORIGIN!=null && ix.DEPARTURE!=null && ix.DESTINATION!=null && ix.ARRIVAL!=null){
+                  picked = tb; colIx = ix; break;
+                }
+              }
+              if(picked) break;
             }
             var trips = [];
             if(picked){
@@ -1481,6 +1507,23 @@ if(MMSI){
     result.mmsi=matches[0].mmsi;
     // Pass berth_verified flag through so web.py can lock the detection
     result.berth_verified = matches[0].berthConfirmed === true;
+
+    // Close runners-up. On a feeder leg it is genuinely common for two ships
+    // (e.g. Elbe Highway and Seine Highway on Zeebrugge->Malmo) to both do the
+    // trip in the same window, and Toyota can book on either — the display
+    // should say "Elbe Highway or Seine Highway" instead of pretending we know.
+    // Threshold is deliberately narrow (within 5 points): a decisive Last Trips
+    // match beats a generic score by 30+ points, so this only fires when we
+    // really cannot tell them apart.
+    var top = matches[0].europeScore || 0;
+    result.alternates = matches.slice(1)
+      .filter(function(m){ return (m.europeScore||0) >= top - 5 && m.mmsi; })
+      .slice(0, 3)
+      .map(function(m){ return {mmsi: m.mmsi, name: m.vessel, score: m.europeScore||0}; });
+    if(result.alternates.length){
+      process.stderr.write("Close runners-up: "+
+        result.alternates.map(function(a){return a.name+" ("+a.score+")";}).join(", ")+"\n");
+    }
   }
 }
 
