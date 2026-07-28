@@ -1089,8 +1089,16 @@ if(MMSI){
       }catch(e){ m.europeScore=0; }
     }
     matches.sort(function(a,b){return (b.europeScore||0)-(a.europeScore||0);});
-    // Reject all if best match has no European ports — it's not a Europe route vessel
-    if((matches[0].europeScore||0) === 0){
+    // NAGOYA only: reject when the best match has no European ports at all —
+    // the deep-sea leg is picking a Japan-departing ship, so no European port
+    // history is a strong "not this one" signal. On FEEDER legs every candidate
+    // is already European by construction, and other signals (the -5 for
+    // "destination isn't the next hub" I added earlier) can push europeScore
+    // to zero or negative on real candidates. Applying the reject there dropped
+    // every ship before berth confirmation and Last Trips could weigh in —
+    // which is why detection returned nothing despite six berth-confirmed
+    // candidates being found.
+    if(LEG === 'nagoya' && (matches[0].europeScore||0) === 0){
       process.stderr.write("Best match "+matches[0].vessel+" europeScore=0, rejecting — not Europe route\n");
       matches=[];
     }
