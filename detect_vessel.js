@@ -964,7 +964,24 @@ if(MMSI){
       for(var vi=0; vi<matches.length; vi++){
         var vm = matches[vi];
         if(!vm.mmsi) continue;
-        var berthOk = await verifyBerth(vm.mmsi, vm.imo||VESSEL_IMO[vm.mmsi]||'', D, LEG);
+        // Anchor the berth check on THIS vessel's own departure time from the
+        // port listing, not on D.
+        //
+        // D is when the CAR reached the hub; each candidate sailed on its own
+        // date, potentially days later. verifyBerth looks for stationary
+        // positions in the [anchor-6d, anchor] window, so passing D asked
+        // "was this ship at the Zeebrugge berth in the six days before the car
+        // arrived" — for Elbe Highway that meant 07-14..07-20 when it was
+        // actually berthed on 07-24/25 before its 07-25 14:15 departure.
+        // Every candidate scored 0 hits and was rejected, including the right
+        // one. The listing row already carries the exact departure time.
+        var berthAnchor = (vm.time && /^\d{4}-\d{2}-\d{2}/.test(vm.time))
+                          ? vm.time.slice(0,10) : D;
+        if(berthAnchor !== D){
+          process.stderr.write(vm.vessel+': berth check anchored on its own departure '+
+                               berthAnchor+' (not D='+D+')\n');
+        }
+        var berthOk = await verifyBerth(vm.mmsi, vm.imo||VESSEL_IMO[vm.mmsi]||'', berthAnchor, LEG);
         if(berthOk === 'E5'){
           // Confirmed at Toyota Europe berth — strong positive signal
           process.stderr.write(vm.vessel+': CONFIRMED at E5 (Europe berth) ✅\n');
