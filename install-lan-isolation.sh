@@ -30,10 +30,15 @@ SUBNET="${SCRAPER_SUBNET:-172.31.77.0/24}"   # must match toyota-egress in Jenki
 PRIVATE="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16"
 MODE="${1:-apply}"
 
-# The scraper's own Docker networks must stay reachable, otherwise it cannot
-# talk to the web container. 172.16/12 covers Docker's default pools, so allow
-# the scraper subnet to itself before the broad denies.
-rules_allow="-I DOCKER-USER 1 -s $SUBNET -d $SUBNET -j RETURN"
+# Two allow-rules go in FIRST, because DOCKER-USER is evaluated at the top of
+# the FORWARD chain — BEFORE Docker's own conntrack accept. Without them, reply
+# packets on connections the web container opened would hit the DROP rules below
+# and the scraper would look dead.
+#
+# Note 172.16.0.0/12 spans 172.16.0.0-172.31.255.255, so the scraper's own
+# egress subnet falls inside the range being denied. Hence the explicit RETURNs.
+rules_established="-I DOCKER-USER 1 -s $SUBNET -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
+rules_allow="-I DOCKER-USER 2 -s $SUBNET -d $SUBNET -j RETURN"
 
 echo "Scraper subnet : $SUBNET"
 echo "Blocking to    : $PRIVATE"
@@ -56,12 +61,17 @@ if [ "$MODE" = "--uninstall" ]; then
         iptables -D DOCKER-USER -s "$SUBNET" -d "$SUBNET" -j RETURN
         echo "removed RETURN $SUBNET -> $SUBNET"
     done
+    while iptables -C DOCKER-USER -s "$SUBNET" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN 2>/dev/null; do
+        iptables -D DOCKER-USER -s "$SUBNET" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+        echo "removed RETURN established"
+    done
     echo "Done. The scraper can reach the LAN again."
     exit 0
 fi
 
 if [ "$MODE" = "--dry-run" ]; then
     echo "Would run:"
+    echo "  iptables $rules_established"
     echo "  iptables $rules_allow"
     for net in $PRIVATE; do
         echo "  iptables -A DOCKER-USER -s $SUBNET -d $net -j DROP"
@@ -80,7 +90,10 @@ if ! iptables -L DOCKER-USER -n >/dev/null 2>&1; then
     exit 1
 fi
 
-# Allow-rule first so it is evaluated before the denies below.
+# Allow-rules first so they are evaluated before the denies below.
+iptables -C DOCKER-USER -s "$SUBNET" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN 2>/dev/null || \
+    iptables $rules_established
+echo "allow  established/related replies from $SUBNET"
 iptables -C DOCKER-USER -s "$SUBNET" -d "$SUBNET" -j RETURN 2>/dev/null || \
     iptables $rules_allow
 echo "allow  $SUBNET -> $SUBNET (scraper to web container)"
