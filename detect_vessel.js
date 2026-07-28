@@ -813,37 +813,19 @@ if(MMSI){
         var vtext=await pg.textContent("body");
         m.europeScore=EUROPE.filter(function(p){return vtext.toUpperCase().includes(p);}).length;
 
-        // ── Is this ship going where the CAR is going? ──────────────────────
-        // europeScore only counts how many European port names appear on the
-        // page, so a vessel idling at Bremerhaven scores well purely for being
-        // in Europe — that is how Triton Leader (5) beat Elbe Highway (3) on a
-        // Zeebrugge->Malmo leg. On a feeder leg the destination is known: it is
-        // the next hub on this car's route.
-        //
-        // This check lives here, on the vessel page every candidate already
-        // fetches, rather than on the live-position API. The earlier attempt was
-        // inside an `if(liveDestMatch)` branch whose regex almost never matches,
-        // so it silently never ran and the scores came back identical.
+        // Log what the page looks like around "destination" so the pattern used
+        // by the next-hub tie-breaker can be verified against the real page. An
+        // earlier version guessed at a DESTINATION: field that turned out never
+        // to match, and the whole check ran on a fallback that penalised every
+        // candidate equally. This just prints — no scoring, no assumptions.
         var VU = vtext.toUpperCase();
-        var destMatch = VU.match(/DESTINATION[:\s]*([A-Z][A-Z0-9 ,.'\/-]{2,40})/);
-        var pageDest = destMatch ? destMatch[1].trim() : '';
-        if(pageDest) process.stderr.write(m.vessel+": page destination="+pageDest+"\n");
-        if(NEXT_HUB){
-          // Match on the declared destination when we could read one; otherwise
-          // fall back to the port simply appearing on the page (weaker, so a
-          // smaller bonus).
-          if(pageDest && pageDest.indexOf(NEXT_HUB) >= 0){
-            process.stderr.write(m.vessel+": destination is the next hub ("+NEXT_HUB+") +30\n");
-            m.europeScore += 30; m.nextHubMatch = true;
-          } else if(!pageDest && VU.indexOf(NEXT_HUB) >= 0){
-            process.stderr.write(m.vessel+": next hub ("+NEXT_HUB+") appears on its page +10\n");
-            m.europeScore += 10;
-          } else if(pageDest && IS_FEEDER_LEG){
-            process.stderr.write(m.vessel+": destination "+pageDest+" is not the next hub ("+
-                                 NEXT_HUB+") -10\n");
-            m.europeScore -= 10;
-          }
+        var destContext = "";
+        var idx = VU.indexOf("DESTINATION");
+        if(idx >= 0){
+          destContext = VU.slice(idx, Math.min(idx+140, VU.length)).replace(/\s+/g, " ");
         }
+        process.stderr.write(m.vessel+": page destination context = "+
+                             (destContext || "(no 'DESTINATION' on page)")+"\n");
         // Extract IMO from vessel page while we have it open (needed for berth verification)
         var imoMatch=vtext.match(/IMO[:\s#]*(\d{7})/i);
         if(imoMatch) { m.imo=imoMatch[1]; process.stderr.write(m.vessel+": IMO="+m.imo+"\n"); }
@@ -1083,6 +1065,44 @@ if(MMSI){
           }
         }
       }
+      // ── Feeder tie-break: pick the berth-confirmed ship that actually
+      // ── carried the car ─────────────────────────────────────────────────
+      // Every berth-confirmed candidate spent time at the Zeebrugge terminal
+      // recently, so they all look the same to europeScore. The distinguishing
+      // fact is when EACH SHIP sailed vs when the car arrived at Malmo — the
+      // one whose departure sits within (WINDOW_END - transit .. WINDOW_END)
+      // is the one that actually did the run. This is data we already have,
+      // not another heuristic.
+      if(IS_FEEDER_LEG && WINDOW_END && /^\d{4}-\d{2}-\d{2}$/.test(WINDOW_END)){
+        var arrival = new Date(WINDOW_END+"T00:00:00Z").getTime();
+        var maxTransitMs = (parseInt(process.env.FEEDER_TRANSIT_DAYS ||
+          ({zeebrugge:3,malmo:3,gothenburg:3,drammen:3,southampton:3,portbury:3,
+            bremerhaven:3,sagunto:5,livorno:5,piraeus:5}[LEG]||3), 10)) * 86400000;
+        for(var ki=0; ki<matches.length; ki++){
+          var mm = matches[ki];
+          if(!mm.berthConfirmed || !mm.time) continue;
+          // Row time from MST is UTC-ish; treat as UTC. Small skew does not
+          // matter because we only need the ORDER of departures.
+          var t = Date.parse(mm.time.replace(" ", "T")+"Z");
+          if(isNaN(t)) continue;
+          // In-window: sailed AFTER (arrival - maxTransit) and BEFORE arrival.
+          // Both bounds inclusive with 12h slack, since MST times can be slightly off.
+          var earliest = arrival - maxTransitMs - 12*3600*1000;
+          var latest   = arrival + 12*3600*1000;
+          if(t >= earliest && t <= latest){
+            var hoursBeforeArrival = Math.round((arrival - t)/3600000);
+            process.stderr.write(mm.vessel+': departed '+mm.time+' ('+
+              hoursBeforeArrival+'h before car reached next hub) — plausible carrier +40\n');
+            mm.europeScore += 40;
+            mm.plausibleCarrier = true;
+          } else {
+            var deltaH = Math.round((t - arrival)/3600000);
+            process.stderr.write(mm.vessel+': departed '+mm.time+' (' +
+              (deltaH>0?'+':'')+deltaH+'h vs arrival) — outside plausible carrier window\n');
+          }
+        }
+      }
+
       matches.sort(function(a,b){return (b.europeScore||0)-(a.europeScore||0);});
       matches = matches.filter(function(m){ return (m.europeScore||0) >= 0; });
       // For NAGOYA leg, require berth confirmation. If no candidate was
