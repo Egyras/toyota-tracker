@@ -831,36 +831,65 @@ if(MMSI){
         // for a berth-idling vessel is often the previous port or a stale
         // rotation. Last Trips shows what actually happened.
         try {
-          var trips = await pg.evaluate(function(){
-            var out = [];
-            var headings = document.querySelectorAll("h1, h2, h3, h4, h5, div, span, p");
-            for(var hi=0; hi<headings.length; hi++){
-              if(!/last\s*trips/i.test(headings[hi].textContent || "")) continue;
-              // Find the nearest following table
-              var node = headings[hi], depth = 0, table = null;
-              while(node && depth++ < 200){
-                node = node.nextElementSibling || (node.parentNode && node.parentNode.nextElementSibling);
-                if(!node) break;
-                if(node.tagName === "TABLE"){ table = node; break; }
-                var t = node.querySelector && node.querySelector("table");
-                if(t){ table = t; break; }
+          // Give the page a moment for the trips table to hydrate — it lives
+          // under a heading that may render before its data arrives. Ignore the
+          // timeout; the fallback that follows still works if the selector
+          // never appears.
+          try { await pg.waitForSelector('table', { timeout: 5000 }); } catch(_){}
+
+          // Extract trips by SCANNING EVERY TABLE for header cells that match
+          // Origin / Departure / Destination / Arrival. The previous version
+          // walked DOM siblings from a "Last Trips" heading, which failed
+          // silently when the heading and table lived in different branches of
+          // the layout — the exact case here, since /^Last Trips/ is a card
+          // header and the table sits several parents away.
+          //
+          // Also dump some diagnostics so this never fails silently again:
+          //   trips_dbg tables=N headers=[...]  → what tables were considered
+          //   trips_dbg matched cols=[...]      → which one won and its headers
+          var probe = await pg.evaluate(function(){
+            var HEADERS_WANT = ['ORIGIN','DEPARTURE','DESTINATION','ARRIVAL'];
+            var tables = document.querySelectorAll('table');
+            var seen = [], picked = null, colIx = null;
+            for(var ti=0; ti<tables.length; ti++){
+              var tb = tables[ti];
+              var hs = tb.querySelectorAll('thead th, thead td, tr:first-child th, tr:first-child td');
+              var hdr = [];
+              for(var hi=0; hi<hs.length; hi++) hdr.push((hs[hi].innerText||'').trim().toUpperCase());
+              seen.push(hdr.join('|'));
+              // Find where each wanted column sits in this table
+              var ix = {};
+              HEADERS_WANT.forEach(function(w){
+                for(var k=0;k<hdr.length;k++){ if(hdr[k].indexOf(w)>=0){ ix[w]=k; break; } }
+              });
+              if(ix.ORIGIN!=null && ix.DEPARTURE!=null && ix.DESTINATION!=null && ix.ARRIVAL!=null){
+                picked = tb; colIx = ix; break;
               }
-              if(!table) continue;
-              var rows = table.querySelectorAll("tbody tr");
+            }
+            var trips = [];
+            if(picked){
+              var rows = picked.querySelectorAll('tbody tr');
+              if(!rows.length) rows = picked.querySelectorAll('tr');
               for(var ri=0; ri<rows.length; ri++){
-                var cells = rows[ri].querySelectorAll("td");
+                var cells = rows[ri].querySelectorAll('td');
                 if(cells.length < 4) continue;
-                out.push({
-                  origin: (cells[0].innerText || "").trim(),
-                  depart: (cells[1].innerText || "").trim(),
-                  dest:   (cells[2].innerText || "").trim(),
-                  arrive: (cells[3].innerText || "").trim(),
+                var val = function(i){ return ((cells[i]&&cells[i].innerText)||'').replace(/\s+/g,' ').trim(); };
+                var origin = val(colIx.ORIGIN);
+                if(!origin || /origin/i.test(origin)) continue; // skip header row when tbody is missing
+                trips.push({
+                  origin: origin, depart: val(colIx.DEPARTURE),
+                  dest: val(colIx.DESTINATION), arrive: val(colIx.ARRIVAL),
                 });
               }
-              break;
             }
-            return out;
+            return { tables: seen.length, headers: seen.slice(0,6), matched: !!picked,
+                     colIx: colIx, trips: trips.slice(0, 8) };
           });
+          process.stderr.write(m.vessel+": trips_dbg tables="+probe.tables+
+            " headers="+JSON.stringify(probe.headers)+
+            " matched="+probe.matched+(probe.colIx?" cols="+JSON.stringify(probe.colIx):"")+
+            " rows="+probe.trips.length+"\n");
+          var trips = probe.trips;
           if(trips && trips.length){
             m.lastTrips = trips.slice(0, 5);
             process.stderr.write(m.vessel+": last trips (top "+m.lastTrips.length+"): "+
