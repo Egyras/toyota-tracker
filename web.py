@@ -480,11 +480,46 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True, created_o
 
         db = get_db()
 
+        # Snapshots of the two history columns, built once so the same values are
+        # used for the change-detection below and for the INSERT further down.
+        steps_snapshot  = {k: v.get("status") for k, v in steps.items()}
+        delivs_snapshot = [{"loc": d.get("locationName"), "country": d.get("countryName"),
+                            "type": d.get("destinationType"), "visited": d.get("isVisited")}
+                           for d in deliveries]
+
         if today_only and order_hash:
             today = datetime.utcnow().strftime("%Y-%m-%d")
-            existing = db.execute("SELECT rowid, status FROM checks WHERE order_hash=? AND ts LIKE ?",
-                          (order_hash, f"{today}%")).fetchone()
+            # Compare against the LATEST row for today — there can now be more
+            # than one (see the change-detection below).
+            existing = db.execute(
+                "SELECT rowid, status, steps_json, deliveries_json FROM checks "
+                "WHERE order_hash=? AND ts LIKE ? ORDER BY ts DESC LIMIT 1",
+                (order_hash, f"{today}%")).fetchone()
+
+            # Did the route or step state actually move since the last check today?
+            #
+            # This branch used to unconditionally return after touching only
+            # `status`, which meant steps_json and deliveries_json kept whatever
+            # they held at the FIRST check of the day. Any transition that
+            # happened later the same day — e.g. Malmo going notVisited ->
+            # current at midday — was silently discarded and never recorded at
+            # all, because by the next day the row already existed too. That is
+            # why per-stop history lagged behind reality by a full day and
+            # get_current_stop_info could not find the stop's real arrival date.
+            #
+            # When something HAS changed we now fall through to the INSERT so the
+            # transition gets its own row and the history stays complete.
+            route_changed = False
             if existing:
+                try:
+                    prev_steps  = json.loads(existing["steps_json"] or "null")
+                    prev_delivs = json.loads(existing["deliveries_json"] or "null")
+                except Exception:
+                    prev_steps, prev_delivs = None, None
+                route_changed = (prev_steps  != steps_snapshot or
+                                 prev_delivs != delivs_snapshot)
+
+            if existing and not route_changed:
                 # Update status if it changed today
                 current_status = order.get("currentStatus", {}).get("currentStatus", "")
                 if current_status and current_status != existing["status"]:
@@ -528,10 +563,8 @@ def save_stats(order: dict, step_dates: dict, today_only: bool = True, created_o
             dest, dest_country,
             1 if status.get("isDelayed") else 0,
             1 if status.get("damageCode") else 0,
-            json.dumps({k: v.get("status") for k, v in steps.items()}),
-            json.dumps([{"loc": d.get("locationName"), "country": d.get("countryName"),
-                         "type": d.get("destinationType"), "visited": d.get("isVisited")}
-                        for d in deliveries])
+            json.dumps(steps_snapshot),
+            json.dumps(delivs_snapshot)
         ))
         # Backfill created_on for all older rows of this order that are missing it
         if created_on and order_hash:
@@ -861,10 +894,10 @@ def get_stats_data():
         JOIN checks c ON c.order_hash = latest.order_hash AND c.ts = latest.ts
         JOIN (
             SELECT order_hash,
-                   COUNT(*) logins,
+                   COUNT(DISTINCT substr(ts,1,10)) logins,
                    CASE
-                     WHEN COUNT(*) <= 1 THEN 99
-                     ELSE CAST(julianday(MAX(ts)) - julianday(MIN(ts)) AS REAL) / (COUNT(*) - 1)
+                     WHEN COUNT(DISTINCT substr(ts,1,10)) <= 1 THEN 99
+                     ELSE CAST(julianday(MAX(ts)) - julianday(MIN(ts)) AS REAL) / (COUNT(DISTINCT substr(ts,1,10)) - 1)
                    END avg_gap
             FROM checks
             WHERE order_hash IS NOT NULL
@@ -916,10 +949,10 @@ def get_stats_data():
         -- Only include frequently logging users
         JOIN (
             SELECT order_hash,
-                   COUNT(*) logins,
+                   COUNT(DISTINCT substr(ts,1,10)) logins,
                    CASE
-                     WHEN COUNT(*) <= 1 THEN 99
-                     ELSE CAST(julianday(MAX(ts)) - julianday(MIN(ts)) AS REAL) / (COUNT(*) - 1)
+                     WHEN COUNT(DISTINCT substr(ts,1,10)) <= 1 THEN 99
+                     ELSE CAST(julianday(MAX(ts)) - julianday(MIN(ts)) AS REAL) / (COUNT(DISTINCT substr(ts,1,10)) - 1)
                    END avg_gap
             FROM checks WHERE order_hash IS NOT NULL GROUP BY order_hash
         ) freq ON sd_build.order_hash = freq.order_hash
@@ -978,7 +1011,7 @@ def get_stats_data():
     # Login frequency per order
     login_freq = db.execute("""
         SELECT order_hash, dest_country, model, status,
-               COUNT(*) as logins,
+               COUNT(DISTINCT substr(ts,1,10)) as logins,
                MIN(ts) as first_login,
                MAX(ts) as last_login,
                CAST((julianday(MAX(ts)) - julianday(MIN(ts))) AS INTEGER) as days_tracked
@@ -3572,10 +3605,15 @@ def index():
                 else:
                     details['_step_observed'] = {}
                     details['_lf_bounded'] = False
-                # Login frequency for date reliability disclaimer
+                # Login frequency for date reliability disclaimer.
+                # Counts DISTINCT DAYS, not rows: save_stats now writes an extra
+                # row whenever the route state changes mid-day, so COUNT(*) would
+                # inflate "logins" and make the date-reliability badge claim more
+                # precision than we actually have. Days is also what days_gap
+                # (days_tracked / logins) was always meant to measure.
                 if order_hash:
                     freq = get_db().execute("""
-                        SELECT COUNT(*) logins,
+                        SELECT COUNT(DISTINCT substr(ts,1,10)) logins,
                                CAST((julianday(MAX(ts)) - julianday(MIN(ts))) AS INTEGER) days_tracked,
                                MIN(ts) first_login
                         FROM checks WHERE order_hash=?
