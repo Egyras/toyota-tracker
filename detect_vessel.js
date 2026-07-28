@@ -18,6 +18,11 @@ const HUB_PORT=(process.argv[6]||"").toUpperCase();      // intermediate hub por
 // out of the intended path. Allowlisting is used rather than escaping because
 // these are identifiers with a known shape — anything outside it is not
 // something we should be fetching.
+// Deep-sea (Japan -> Europe) legs behave very differently from short European
+// feeder hops: different departure-window direction, different plausible
+// destinations. Several checks below branch on this.
+const IS_FEEDER_LEG = !(LEG === "nagoya" || LEG === "yokkaichi" || LEG === "hiroshima");
+
 function safeNum(v, maxLen){
   var s = String(v == null ? "" : v).replace(/[^0-9]/g, "");
   return s.slice(0, maxLen || 15);
@@ -578,9 +583,33 @@ if(MMSI){
   //   same-day arrivals (e.g. Vela Leader at Nagoya for loading, not departing).
   // Window: D-6 to D-1 — 6 days, all strictly before the recorded date.
   // Covers the observed 5-day gap with a 1-day safety margin.
+  //
+  // THAT REASONING ONLY HOLDS FOR THE NAGOYA LEG. There, D is the date of the
+  // "left the factory" email, which arrives AFTER the ship sailed, so searching
+  // backwards is right.
+  //
+  // On a feeder leg (Zeebrugge->Malmo, Malmo->Paldiski) D means the opposite:
+  // it is when we observed the car AT that hub. The ship departs at or AFTER
+  // that moment, never 6 days before it. Using the backward window there
+  // searched a period the car had not even reached the hub in — which is why
+  // Zeebrugge departures for LT-1 returned Prima Viking / Morning Lucy /
+  // Hoegh Trooper and not Danube Highway or Elbe Highway: those sailed after
+  // the window closed, so they were never in the 50 rows to begin with.
+  //
+  // Feeder window straddles D instead:
+  //   -2 days: our observation can lag the real arrival, since logins are
+  //            periodic and the hub date is "first time we SAW the car here".
+  //   +8 days: cars wait at the hub for the next feeder sailing; the observed
+  //            Zeebrugge->Malmo cycle runs about a week.
   var lf=new Date(D+"T00:00:00Z");
-  var start=Math.floor((lf.getTime()-6*86400000)/1000);
-  var end  =Math.floor((lf.getTime()-1*86400000)/1000);
+  var isDeepSea = (LEG === "nagoya" || LEG === "yokkaichi" || LEG === "hiroshima");
+  var backDays    = isDeepSea ? 6 : 2;
+  var forwardDays = isDeepSea ? 1 : -8;   // negative = search forward past D
+  var start=Math.floor((lf.getTime()-backDays*86400000)/1000);
+  var end  =Math.floor((lf.getTime()-forwardDays*86400000)/1000);
+  process.stderr.write("Departure window for "+LEG+" ("+(isDeepSea?"deep-sea":"feeder")+"): "+
+    new Date(start*1000).toISOString().slice(0,10)+" .. "+
+    new Date(end*1000).toISOString().slice(0,10)+" (anchor D="+D+")\n");
   var u="https://www.myshiptracking.com/ports-arrivals-departures/?mmsi=&pid="+safeNum(pid)+"&type=2&time="+safeNum(start,12)+"_"+safeNum(end,12)+"&pp=200";
   process.stderr.write("Port "+LEG+" (pid:"+pid+") URL: "+u+"\n");
   await pg.goto(u,{timeout:30000});
@@ -645,6 +674,33 @@ if(MMSI){
           process.stderr.write(m.vessel+": MST/shipinfo dest="+knownDest+" is off-route, penalizing -20\n");
           if(!m.europeScore) m.europeScore = 0;
           m.europeScore -= 20;
+        }
+        // Feeder legs know where the car is going: Zeebrugge -> Malmo -> Paldiski
+        // are all short intra-European hops. A ship on that run is bound for a
+        // European port, full stop. The generic OFF_ROUTE lists are blocklists
+        // built for the deep-sea leg and contain no Indian-subcontinent ports,
+        // so Hoegh Trooper — sitting at the Zeebrugge berth but sailing for
+        // ENNORE, India — passed every check and got picked as LT-1's carrier.
+        //
+        // For feeders an allowlist is both stronger and simpler: if we know the
+        // destination and it is not European, this is not our ship. Deep-sea is
+        // deliberately excluded, since a Japan->Europe rotation legitimately
+        // calls at Singapore, Colombo, Suez and similar en route.
+        if(IS_FEEDER_LEG && knownDest){
+          var EURO_DEST_OK = EUROPE.concat([
+            'ZEEBRUGGE','MALMO','MALMÖ','PALDISKI','GOTHENBURG','GOTEBORG',
+            'DRAMMEN','BREMERHAVEN','ANTWERP','ROTTERDAM','SOUTHAMPTON',
+            'PORTBURY','BRISTOL','SAGUNTO','LIVORNO','PIRAEUS','VEJLE',
+            'HANKO','KOTKA','RIGA','KLAIPEDA','TALLINN','HELSINKI','OSLO',
+            'COPENHAGEN','HAMBURG','CUXHAVEN','AMSTERDAM','VLISSINGEN',
+          ]);
+          var destLooksEuropean = EURO_DEST_OK.some(function(p){ return knownDest.indexOf(p) >= 0; });
+          if(!destLooksEuropean){
+            process.stderr.write(m.vessel+": dest="+knownDest+" is not a European port and this is a "+
+              "feeder leg ("+LEG+") — hard reject -50\n");
+            if(!m.europeScore) m.europeScore = 0;
+            m.europeScore -= 50;
+          }
         }
         var vurl="https://www.myshiptracking.com/vessels/"+
                  safeSlug(m.vessel)+"-mmsi-"+safeNum(m.mmsi);
