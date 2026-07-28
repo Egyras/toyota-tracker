@@ -3899,8 +3899,16 @@ def internal_detect():
 
     body = request.get_json(silent=True) or {}
     argv = body.get("argv")
-    if not isinstance(argv, list) or not (2 <= len(argv) <= 5):
-        return jsonify(error="bad argv"), 400
+    # Positional contract with detect_vessel.js:
+    #   0 date | 1 mmsi | 2 leg | 3 dest_country | 4 hub_port | 5 window_end
+    # Keep this bound in step when adding arguments — it was left at 5 when
+    # window_end was introduced, so every real request was rejected as
+    # "bad argv" before it reached the browser.
+    ARGV_MAX = 6
+    if not isinstance(argv, list) or not (2 <= len(argv) <= ARGV_MAX):
+        return jsonify(error="bad argv",
+                       detail=f"expected 2..{ARGV_MAX} elements, got "
+                              f"{len(argv) if isinstance(argv, list) else type(argv).__name__}"), 400
     argv = ["" if a is None else str(a) for a in argv]
 
     # Re-validate here rather than trusting the caller. The web container already
@@ -3916,6 +3924,11 @@ def internal_detect():
         return jsonify(error="bad mmsi"), 400
     if len(argv) >= 3 and argv[2] and argv[2] not in VALID_LEGS:
         return jsonify(error="bad leg"), 400
+    if len(argv) >= 6 and argv[5]:
+        try:
+            datetime.strptime(argv[5], "%Y-%m-%d")
+        except ValueError:
+            return jsonify(error="bad window_end"), 400
     for extra in argv[3:]:
         if len(extra) > 64 or not all(c.isalnum() or c in " -_." for c in extra):
             return jsonify(error="bad argument"), 400

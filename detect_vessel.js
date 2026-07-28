@@ -632,7 +632,26 @@ if(MMSI){
       // departure sits roughly one sea-transit earlier. Zeebrugge still bounds
       // it — the ship cannot have left before the car arrived — so take whichever
       // lower bound is later.
-      var maxTransitDays = parseInt(process.env.FEEDER_TRANSIT_DAYS || "7", 10);
+      // How far back from the arrival to look, per departure port. These are
+      // SEA transit times, not door-to-door: Zeebrugge->Malmo is about two days
+      // of actual sailing, and any extra elapsed time is the car waiting on the
+      // quay — which the window must not try to cover, because the ship was not
+      // at sea then. Padding these "just in case" is what pulled in 50 unrelated
+      // departures and let a ship bound for India score highest.
+      var TRANSIT_BY_LEG = {
+        zeebrugge:   3,   // -> Malmo / Baltic feeder, ~2 days at sea
+        malmo:       3,   // -> Paldiski, overnight
+        gothenburg:  3,
+        drammen:     3,
+        southampton: 3,
+        portbury:    3,
+        bremerhaven: 3,
+        sagunto:     5,   // Mediterranean legs run longer
+        livorno:     5,
+        piraeus:     5,
+      };
+      var maxTransitDays = parseInt(
+        process.env.FEEDER_TRANSIT_DAYS || TRANSIT_BY_LEG[LEG] || 3, 10);
       var backstop = Math.floor((we.getTime() - maxTransitDays*86400000)/1000);
       if(backstop > start) start = backstop;
       windowSource = "feeder, back from next-hub arrival "+WINDOW_END+
