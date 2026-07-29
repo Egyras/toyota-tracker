@@ -1512,12 +1512,13 @@ if(MMSI){
     // (e.g. Elbe Highway and Seine Highway on Zeebrugge->Malmo) to both do the
     // trip in the same window, and Toyota can book on either — the display
     // should say "Elbe Highway or Seine Highway" instead of pretending we know.
-    // Threshold is deliberately narrow (within 5 points): a decisive Last Trips
-    // match beats a generic score by 30+ points, so this only fires when we
-    // really cannot tell them apart.
+    // Threshold: within 40 points on feeder legs (the +30 destination bonus and
+    // +100 Last Trips bonus create large gaps between genuine alternates on the
+    // same route), within 10 points on deep-sea legs where the field is wider.
     var top = matches[0].europeScore || 0;
+    var altThreshold = IS_FEEDER_LEG ? 40 : 10;
     result.alternates = matches.slice(1)
-      .filter(function(m){ return (m.europeScore||0) >= top - 5 && m.mmsi; })
+      .filter(function(m){ return (m.europeScore||0) >= top - altThreshold && m.mmsi; })
       .slice(0, 3)
       .map(function(m){ return {mmsi: m.mmsi, name: m.vessel, score: m.europeScore||0}; });
     if(result.alternates.length){

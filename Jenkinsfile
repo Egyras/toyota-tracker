@@ -208,12 +208,13 @@ except Exception as e:
                     KEEP_BUILD="build-${env.BUILD_NUMBER}"
                     echo "Cleaning Docker Hub — keeping: latest, \$KEEP_BUILD"
 
-                    TOKEN=\$(python3 -c "
+                    TOKEN=\$(python3 -c '
 import urllib.request, json, os
-data = json.dumps({'username': os.environ['DOCKER_USER'], 'password': os.environ['DOCKER_PASS']}).encode()
-req = urllib.request.Request('https://hub.docker.com/v2/users/login/', data=data, headers={'Content-Type': 'application/json'})
-print(json.load(urllib.request.urlopen(req))['token'])
-" 2>/dev/null)
+data = json.dumps({"username": os.environ["DOCKER_USER"], "password": os.environ["DOCKER_PASS"]}).encode()
+req = urllib.request.Request("https://hub.docker.com/v2/users/login/", data=data, headers={"Content-Type": "application/json"})
+print(json.load(urllib.request.urlopen(req))["token"])
+' 2>&1) || echo "Python exit code: \$?"
+                    echo "TOKEN length: \${#TOKEN}"
 
                     if [ -z "\$TOKEN" ]; then echo "Hub login failed, skipping cleanup"; exit 0; fi
 
