@@ -72,8 +72,14 @@ pipeline {
         //   4. redeploy and confirm vessel detection still works
         stage('Deploy on TrueNAS') {
             steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerhub',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
                 sh """
                     set -eu
+                    echo "\$DOCKER_PASS" | docker login -u "\$DOCKER_USER" --password-stdin
                     docker pull ${IMAGE}:${TAG}
 
                     docker stop toyota-tracker toyota-scraper 2>/dev/null || true
@@ -180,6 +186,7 @@ except Exception as e:
 
                     echo "Deployed ${IMAGE}:${TAG} as build #${env.BUILD_NUMBER}"
                 """
+                }
             }
         }
     }
@@ -189,6 +196,36 @@ except Exception as e:
             sh 'docker image prune -f --filter "dangling=true" || true'
         }
         success {
+            // Clean up old tags on Docker Hub — keep only 'latest' and current build.
+            withCredentials([usernamePassword(
+                credentialsId: 'dockerhub',
+                usernameVariable: 'DOCKER_USER',
+                passwordVariable: 'DOCKER_PASS'
+            )]) {
+                sh '''
+                    set +e
+                    KEEP="latest build-''' + env.BUILD_NUMBER + '''"
+                    TOKEN=$(curl -sf "https://hub.docker.com/v2/users/login/" \
+                        -H "Content-Type: application/json" \
+                        -d "{\\"username\\": \\"$DOCKER_USER\\", \\"password\\": \\"$DOCKER_PASS\\"}" \
+                        | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
+                    if [ -z "$TOKEN" ]; then echo "Hub login failed, skipping cleanup"; exit 0; fi
+                    TAGS=$(curl -sf "https://hub.docker.com/v2/repositories/''' + IMAGE + '''/tags/?page_size=100" \
+                        -H "Authorization: Bearer $TOKEN" \
+                        | python3 -c "import sys,json;[print(t['name']) for t in json.load(sys.stdin).get('results',[])]" 2>/dev/null)
+                    for tag in $TAGS; do
+                        SKIP=false
+                        for k in $KEEP; do [ "$tag" = "$k" ] && SKIP=true; done
+                        if [ "$SKIP" = "false" ]; then
+                            echo "Deleting tag: $tag"
+                            curl -sf -X DELETE \
+                                "https://hub.docker.com/v2/repositories/''' + IMAGE + '''/tags/$tag/" \
+                                -H "Authorization: Bearer $TOKEN" || true
+                        fi
+                    done
+                    echo "Hub cleanup done — kept: $KEEP"
+                '''
+            }
             echo "✅ Build #${env.BUILD_NUMBER} deployed — http://192.168.8.211:8889"
         }
         failure {
