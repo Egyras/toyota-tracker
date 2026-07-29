@@ -224,37 +224,43 @@ import urllib.request, json, sys, os
 keep = set(os.environ.get('KEEP_TAGS', '').split(','))
 repo = os.environ['HUB_REPO']
 token = os.environ['HUB_TOKEN']
-hdr = {'Authorization': 'Bearer ' + token}
+ns, name = repo.split('/')
+hdr = {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'}
 
 req = urllib.request.Request(
-    'https://hub.docker.com/v2/repositories/' + repo + '/tags/?page_size=100',
+    'https://hub.docker.com/v2/namespaces/' + ns + '/repositories/' + name + '/images',
     headers=hdr)
-tags = json.load(urllib.request.urlopen(req)).get('results', [])
+images = json.load(urllib.request.urlopen(req)).get('results', [])
 
-for t in tags:
-    name = t['name']
-    digest = t.get('digest', '')
-    if name in keep:
-        print('  keeping: ' + name)
-        continue
+delete_digests = []
+for img in images:
+    tags = [t['tag'] for t in img.get('tags', [])]
+    digest = img.get('digest', '')
     if not digest:
-        print('  skip (no digest): ' + name)
         continue
-    print('  deleting image: ' + name + ' (' + digest[:20] + '...)')
-    try:
-        dreq = urllib.request.Request(
-            'https://hub.docker.com/v2/repositories/' + repo + '/images/' + digest,
-            method='DELETE', headers=hdr)
-        urllib.request.urlopen(dreq)
-    except Exception as e:
-        print('    digest delete failed (' + str(e) + '), removing tag...')
-        try:
-            treq = urllib.request.Request(
-                'https://hub.docker.com/v2/repositories/' + repo + '/tags/' + name + '/',
-                method='DELETE', headers=hdr)
-            urllib.request.urlopen(treq)
-        except Exception as e2:
-            print('    tag delete also failed: ' + str(e2))
+    if any(t in keep for t in tags):
+        print('  keeping: ' + ', '.join(tags) + ' (' + digest[:20] + '...)')
+        continue
+    print('  will delete: ' + (', '.join(tags) or 'untagged') + ' (' + digest[:20] + '...)')
+    delete_digests.append(digest)
+
+if not delete_digests:
+    print('  nothing to delete')
+    sys.exit(0)
+
+# Batch delete images by digest
+data = json.dumps({'manifests': [{'digest': d} for d in delete_digests]}).encode()
+dreq = urllib.request.Request(
+    'https://hub.docker.com/v2/namespaces/' + ns + '/repositories/' + name + '/images/delete',
+    data=data, method='POST', headers=hdr)
+try:
+    resp = urllib.request.urlopen(dreq)
+    print('  deleted ' + str(len(delete_digests)) + ' images')
+except Exception as e:
+    print('  batch delete failed: ' + str(e))
+    # Try reading error body
+    if hasattr(e, 'read'):
+        print('  ' + e.read().decode())
 PYEOF
 )
                     docker run --rm \
