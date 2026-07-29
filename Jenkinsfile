@@ -202,29 +202,34 @@ except Exception as e:
                 usernameVariable: 'DOCKER_USER',
                 passwordVariable: 'DOCKER_PASS'
             )]) {
-                sh '''
+                sh """
                     set +e
-                    KEEP="latest build-''' + env.BUILD_NUMBER + '''"
-                    TOKEN=$(curl -sf "https://hub.docker.com/v2/users/login/" \
+                    REPO="${IMAGE}"
+                    KEEP_BUILD="build-${env.BUILD_NUMBER}"
+                    echo "Cleaning Docker Hub — keeping: latest, \$KEEP_BUILD"
+
+                    TOKEN=\$(curl -sf "https://hub.docker.com/v2/users/login/" \
                         -H "Content-Type: application/json" \
-                        -d "{\\"username\\": \\"$DOCKER_USER\\", \\"password\\": \\"$DOCKER_PASS\\"}" \
+                        -d '{"username": "'\$DOCKER_USER'", "password": "'\$DOCKER_PASS'"}' \
                         | python3 -c "import sys,json;print(json.load(sys.stdin)['token'])" 2>/dev/null)
-                    if [ -z "$TOKEN" ]; then echo "Hub login failed, skipping cleanup"; exit 0; fi
-                    TAGS=$(curl -sf "https://hub.docker.com/v2/repositories/''' + IMAGE + '''/tags/?page_size=100" \
-                        -H "Authorization: Bearer $TOKEN" \
-                        | python3 -c "import sys,json;[print(t['name']) for t in json.load(sys.stdin).get('results',[])]" 2>/dev/null)
-                    for tag in $TAGS; do
-                        SKIP=false
-                        for k in $KEEP; do [ "$tag" = "$k" ] && SKIP=true; done
-                        if [ "$SKIP" = "false" ]; then
-                            echo "Deleting tag: $tag"
-                            curl -sf -X DELETE \
-                                "https://hub.docker.com/v2/repositories/''' + IMAGE + '''/tags/$tag/" \
-                                -H "Authorization: Bearer $TOKEN" || true
-                        fi
-                    done
-                    echo "Hub cleanup done — kept: $KEEP"
-                '''
+
+                    if [ -z "\$TOKEN" ]; then echo "Hub login failed, skipping cleanup"; exit 0; fi
+
+                    curl -sf "https://hub.docker.com/v2/repositories/\$REPO/tags/?page_size=100" \
+                        -H "Authorization: Bearer \$TOKEN" \
+                        | python3 -c "import sys,json;[print(t['name']) for t in json.load(sys.stdin).get('results',[])]" \
+                        | while read tag; do
+                            if [ "\$tag" = "latest" ] || [ "\$tag" = "\$KEEP_BUILD" ]; then
+                                echo "  keeping: \$tag"
+                            else
+                                echo "  deleting: \$tag"
+                                curl -sf -X DELETE \
+                                    "https://hub.docker.com/v2/repositories/\$REPO/tags/\$tag/" \
+                                    -H "Authorization: Bearer \$TOKEN" || true
+                            fi
+                        done
+                    echo "Hub cleanup done"
+                """
             }
             echo "✅ Build #${env.BUILD_NUMBER} deployed — http://192.168.8.211:8889"
         }
