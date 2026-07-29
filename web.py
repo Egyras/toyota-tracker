@@ -2589,7 +2589,7 @@ TRACKER_PAGE = BASE + """
     {% set active = namespace(key='nagoya', row='') %}
     {% for d in delivs %}
     {% set aloc = d.locationName | lower %}
-    {% if d.isVisited == 'visited' and d.destinationType in ['HUB','TRANSIT'] %}
+    {% if d.isVisited in ('visited', 'current') and d.destinationType in ['HUB','TRANSIT'] %}
       {% if 'zeebrugge' in aloc %}{% set active.key = 'zeebrugge' %}
       {% elif 'malmo' in aloc or 'malmö' in aloc %}{% set active.key = 'malmo' %}
       {% elif 'sagunto' in aloc %}{% set active.key = 'sagunto' %}
@@ -2650,6 +2650,21 @@ TRACKER_PAGE = BASE + """
           {% elif v in ['inTransit', 'current'] %}badge-current
           {% else %}badge-pending{% endif %}">{{ v }}</span>
       </div>
+      {# Completed leg: show which vessel carried the car to this hub. #}
+      {% set prev_leg = 'nagoya' if d.destinationType == 'FACTORY' else
+                        'zeebrugge' if 'Zeebrugge' in d.locationName else
+                        'malmo' if 'Malmo' in d.locationName or 'Malmö' in d.locationName else
+                        'sagunto' if 'Sagunto' in d.locationName else
+                        'livorno' if 'Livorno' in d.locationName else
+                        'portbury' if 'Portbury' in d.locationName or 'Bristol' in d.locationName else
+                        'piraeus' if 'Piraeus' in d.locationName else '' %}
+      {% if v in ('visited', 'current') and prev_leg and prev_leg in order._completed_legs %}
+      {% set cl = order._completed_legs[prev_leg] %}
+      <div style="margin:4px 0 2px 44px;font-size:12px;color:var(--muted);">
+        &#x1F6A2; Carried by <span style="color:var(--text);font-weight:500;">{{ cl.name }}</span>
+        {% if cl.alternates %}<span style="opacity:.7;"> or {{ cl.alternates[0].name|title }}</span>{% endif %}
+      </div>
+      {% endif %}
       {# Controls render on the car's current position only, keyed to the active
          leg — see the `active` namespace above for why they are not keyed to
          this row's own location. #}
@@ -3353,7 +3368,11 @@ TRACKER_PAGE = BASE + """
         for(var i=0; i<window.routeStops.length-1; i++){
           var here = window.routeStops[i].visited;
           var next = window.routeStops[i+1].visited;
-          if(here === 'visited' && next !== 'visited'){ fromIdx = i; break; }
+          // 'current' means the car is AT that stop — treat it as visited
+          // for segment picking, otherwise the bar shows the PREVIOUS leg.
+          var hereOk = (here === 'visited' || here === 'current');
+          var nextOk = (next === 'visited' || next === 'current');
+          if(hereOk && !nextOk){ fromIdx = i; break; }
         }
         // Everything visited -> the car is at the dealer; show the last leg 100%.
         if(fromIdx < 0){
@@ -4264,12 +4283,33 @@ def index():
                     """, (order_hash,)).fetchone()
                     details['_vessel_mmsi'] = v['vessel_mmsi'] if v else ''
                     details['_vessel_name'] = v['vessel_name'] if v else ''
+                    # Completed leg vessel history — static display for legs
+                    # whose destination hub has already been reached.
+                    completed_legs = {}
+                    for vo in get_db().execute("""
+                        SELECT leg, detected_name, detected_mmsi, alternates_json
+                        FROM vessel_overrides
+                        WHERE order_hash=? AND detected_name IS NOT NULL
+                    """, (order_hash,)).fetchall():
+                        alts = []
+                        if vo['alternates_json']:
+                            try:
+                                alts = json.loads(vo['alternates_json'])
+                            except Exception:
+                                pass
+                        completed_legs[vo['leg']] = {
+                            'name': vo['detected_name'],
+                            'mmsi': vo['detected_mmsi'] or '',
+                            'alternates': alts,
+                        }
+                    details['_completed_legs'] = completed_legs
                 else:
                     details['_logins']       = 1
                     details['_days_tracked'] = 0
                     details['_first_login']  = ''
                     details['_vessel_mmsi']  = ''
                     details['_vessel_name']  = ''
+                    details['_completed_legs'] = {}
                 # Enrich intermediateDeliveries with lat/lng (API doesn't provide them)
                 for d in details.get('intermediateDeliveries') or []:
                     if not d.get('locationLatitude'):
