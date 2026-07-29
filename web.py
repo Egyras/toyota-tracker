@@ -2586,19 +2586,19 @@ TRACKER_PAGE = BASE + """
        overrides['zeebrugge']. Anything typed there went into a leg nothing reads.
        Keying the controls off `active.key` guarantees the manual override and the
        auto-detection address the same leg. #}
-    {% set active = namespace(key='nagoya', row='') %}
+    {% set active = namespace(key='nagoya', row='', departed=true) %}
     {% for d in delivs %}
     {% set aloc = d.locationName | lower %}
     {% if d.isVisited in ('visited', 'current') and d.destinationType in ['HUB','TRANSIT'] %}
-      {% if 'zeebrugge' in aloc %}{% set active.key = 'zeebrugge' %}
-      {% elif 'malmo' in aloc or 'malmö' in aloc %}{% set active.key = 'malmo' %}
-      {% elif 'sagunto' in aloc %}{% set active.key = 'sagunto' %}
-      {% elif 'livorno' in aloc %}{% set active.key = 'livorno' %}
-      {% elif 'bristol' in aloc or 'portbury' in aloc %}{% set active.key = 'portbury' %}
-      {% elif 'southampton' in aloc %}{% set active.key = 'southampton' %}
-      {% elif 'drammen' in aloc %}{% set active.key = 'drammen' %}
-      {% elif 'piraeus' in aloc %}{% set active.key = 'piraeus' %}
-      {% elif 'gothenburg' in aloc or 'göteborg' in aloc %}{% set active.key = 'gothenburg' %}
+      {% if 'zeebrugge' in aloc %}{% set active.key = 'zeebrugge' %}{% set active.departed = (d.isVisited == 'visited') %}
+      {% elif 'malmo' in aloc or 'malmö' in aloc %}{% set active.key = 'malmo' %}{% set active.departed = (d.isVisited == 'visited') %}
+      {% elif 'sagunto' in aloc %}{% set active.key = 'sagunto' %}{% set active.departed = (d.isVisited == 'visited') %}
+      {% elif 'livorno' in aloc %}{% set active.key = 'livorno' %}{% set active.departed = (d.isVisited == 'visited') %}
+      {% elif 'bristol' in aloc or 'portbury' in aloc %}{% set active.key = 'portbury' %}{% set active.departed = (d.isVisited == 'visited') %}
+      {% elif 'southampton' in aloc %}{% set active.key = 'southampton' %}{% set active.departed = (d.isVisited == 'visited') %}
+      {% elif 'drammen' in aloc %}{% set active.key = 'drammen' %}{% set active.departed = (d.isVisited == 'visited') %}
+      {% elif 'piraeus' in aloc %}{% set active.key = 'piraeus' %}{% set active.departed = (d.isVisited == 'visited') %}
+      {% elif 'gothenburg' in aloc or 'göteborg' in aloc %}{% set active.key = 'gothenburg' %}{% set active.departed = (d.isVisited == 'visited') %}
       {% endif %}
     {% endif %}
     {% endfor %}
@@ -2650,16 +2650,26 @@ TRACKER_PAGE = BASE + """
           {% elif v in ['inTransit', 'current'] %}badge-current
           {% else %}badge-pending{% endif %}">{{ v }}</span>
       </div>
-      {# Completed leg: show which vessel carried the car to this hub. #}
-      {% set prev_leg = 'nagoya' if d.destinationType == 'FACTORY' else
-                        'zeebrugge' if 'Zeebrugge' in d.locationName else
-                        'malmo' if 'Malmo' in d.locationName or 'Malmö' in d.locationName else
-                        'sagunto' if 'Sagunto' in d.locationName else
-                        'livorno' if 'Livorno' in d.locationName else
-                        'portbury' if 'Portbury' in d.locationName or 'Bristol' in d.locationName else
-                        'piraeus' if 'Piraeus' in d.locationName else '' %}
-      {% if v in ('visited', 'current') and prev_leg and prev_leg in order._completed_legs %}
-      {% set cl = order._completed_legs[prev_leg] %}
+      {# Completed leg: show which vessel carried the car to this hub.
+         The leg key names the DEPARTURE port — so the zeebrugge leg carries
+         the car FROM Zeebrugge TO the next stop (Malmö). We show "Carried by"
+         on the ARRIVAL stop, which is the one AFTER the departure hub.
+         `arriving_leg` is the leg that delivered the car HERE. #}
+      {% set arriving_leg = '' %}
+      {% if v in ('visited', 'current') %}
+        {# Walk backwards: which hub BEFORE this stop is a completed leg? #}
+        {% if 'Malmo' in d.locationName or 'Malmö' in d.locationName %}{% set arriving_leg = 'zeebrugge' %}
+        {% elif 'Paldiski' in d.locationName %}{% set arriving_leg = 'malmo' %}
+        {% elif 'Zeebrugge' in d.locationName or 'Sagunto' in d.locationName or
+                'Livorno' in d.locationName or 'Portbury' in d.locationName or
+                'Bristol' in d.locationName or 'Piraeus' in d.locationName or
+                'Drammen' in d.locationName or 'Southampton' in d.locationName %}{% set arriving_leg = 'nagoya' %}
+        {% elif 'Vejle' in d.locationName or 'Ystad' in d.locationName %}{% set arriving_leg = 'malmo' %}
+        {% elif d.destinationType == 'HUB' and 'Gothenburg' in d.locationName %}{% set arriving_leg = 'zeebrugge' %}
+        {% endif %}
+      {% endif %}
+      {% if arriving_leg and arriving_leg in order._completed_legs %}
+      {% set cl = order._completed_legs[arriving_leg] %}
       <div style="margin:4px 0 2px 44px;font-size:12px;color:var(--muted);">
         &#x1F6A2; Carried by <span style="color:var(--text);font-weight:500;">{{ cl.name }}</span>
         {% if cl.alternates %}<span style="opacity:.7;"> or {{ cl.alternates[0].name|title }}</span>{% endif %}
@@ -3467,6 +3477,17 @@ TRACKER_PAGE = BASE + """
         var dateReliable = lfBounded || hasUserDate || hasUserMmsi;
 
         if(hash){
+          // active.departed is false when the car is still AT the departure hub
+          // (status=current, not visited). Detection makes no sense: the ship
+          // hasn't loaded the car yet. Completed legs show a static "Carried by"
+          // note instead. Detection activates once Toyota changes the hub to
+          // 'visited' and the next stop to 'current'.
+          var legDeparted = {{ 'true' if active.departed else 'false' }};
+          if(!legDeparted){
+            var skel0b = document.getElementById('vessel-skeleton');
+            if(skel0b) skel0b.style.display = 'none';
+            return;
+          }
           if(!dateReliable){
             // Date is unreliable — skip auto-detection (would produce a guess), show prompt instead.
             // Hide skeleton, vessel card stays hidden, user enters date from Toyota email.
