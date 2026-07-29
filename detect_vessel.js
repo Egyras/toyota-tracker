@@ -545,7 +545,7 @@ const br=await chromium.launch({
 const pg=await (await br.newContext()).newPage();
 try{
 // Login
-await pg.goto("https://www.myshiptracking.com/",{timeout:30000});
+await pg.goto("https://www.myshiptracking.com/",{timeout:30000,waitUntil:"domcontentloaded"});
 await pg.waitForTimeout(4000);
 for(var i=0;i<3;i++){
   try{await pg.click("button:has-text(\"Accept all\")",{timeout:500});}catch(e){}
@@ -695,7 +695,7 @@ if(MMSI){
           "&pid="+safeNum(pid)+"&type=2&time="+safeNum(start,12)+"_"+safeNum(end,12);
     if(page===1) process.stderr.write("Port "+LEG+" (pid:"+pid+") URL: "+u+"\n");
     try{
-      await pg.goto(u,{timeout:30000});
+      await pg.goto(u,{timeout:30000,waitUntil:"domcontentloaded"});
       await pg.waitForTimeout(page===1?6000:2500);
     }catch(e){
       process.stderr.write("page "+page+" failed to load: "+e.message+"\n");
@@ -808,7 +808,7 @@ if(MMSI){
         }
         var vurl="https://www.myshiptracking.com/vessels/"+
                  safeSlug(m.vessel)+"-mmsi-"+safeNum(m.mmsi);
-        await pg.goto(vurl,{timeout:20000});
+        await pg.goto(vurl,{timeout:20000,waitUntil:"domcontentloaded"});
         await pg.waitForTimeout(3000);
         var vtext=await pg.textContent("body");
         m.europeScore=EUROPE.filter(function(p){return vtext.toUpperCase().includes(p);}).length;
