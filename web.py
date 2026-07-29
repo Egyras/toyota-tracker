@@ -488,15 +488,18 @@ def _cache_vessel(db, order_hash: str, vessel: dict, leg: str = "nagoya"):
         ))
         # Also keep vessel_overrides in sync
         if vessel.get("mmsi"):
+            alt_json = json.dumps(vessel.get('alternates') or []) if vessel.get('alternates') else None
             db.execute("""
                 INSERT INTO vessel_overrides
-                    (order_hash, leg, detected_mmsi, detected_name, detected_at, source, created_at)
-                VALUES (?, ?, ?, ?, datetime('now'), 'auto', datetime('now'))
+                    (order_hash, leg, detected_mmsi, detected_name, detected_at, source, created_at,
+                     alternates_json)
+                VALUES (?, ?, ?, ?, datetime('now'), 'auto', datetime('now'), ?)
                 ON CONFLICT(order_hash, leg) DO UPDATE SET
-                    detected_mmsi = excluded.detected_mmsi,
-                    detected_name = excluded.detected_name,
-                    detected_at   = excluded.detected_at
-            """, (order_hash, leg, vessel.get("mmsi"), vessel.get("name")))
+                    detected_mmsi   = excluded.detected_mmsi,
+                    detected_name   = excluded.detected_name,
+                    detected_at     = excluded.detected_at,
+                    alternates_json = COALESCE(excluded.alternates_json, vessel_overrides.alternates_json)
+            """, (order_hash, leg, vessel.get("mmsi"), vessel.get("name"), alt_json))
         db.commit()
     except Exception as e:
         print(f"[vessel cache] {e}", file=sys.stderr)
@@ -2672,7 +2675,7 @@ TRACKER_PAGE = BASE + """
       {% set cl = order._completed_legs[arriving_leg] %}
       <div style="margin:4px 0 2px 44px;font-size:12px;color:var(--muted);">
         &#x1F6A2; Carried by <span style="color:var(--text);font-weight:500;">{{ cl.name }}</span>
-        {% if cl.alternates %}<span style="opacity:.7;"> or {{ cl.alternates[0].name|title }}</span>{% endif %}
+        {% if cl.alternates %}<span style="opacity:.7;"> or {{ cl.alternates[0]['name']|title }}</span>{% endif %}
       </div>
       {% endif %}
       {# Controls render on the car's current position only, keyed to the active
