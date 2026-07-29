@@ -264,8 +264,14 @@ def _detect_local(argv, timeout):
                 ['node', '/app/detect_vessel.js', *argv],
                 capture_output=True, text=True, timeout=timeout, env=env
             )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as te:
         print(f"[vessel scraper] timed out after {timeout}s", file=sys.stderr)
+        if te.stderr:
+            partial = te.stderr if isinstance(te.stderr, str) else te.stderr.decode(errors="replace")
+            print(f"[detector partial stderr]\n{partial[-4000:]}", file=sys.stderr)
+        if te.stdout:
+            partial_out = te.stdout if isinstance(te.stdout, str) else te.stdout.decode(errors="replace")
+            print(f"[detector partial stdout]\n{partial_out[-2000:]}", file=sys.stderr)
         return None
     except Exception as e:
         # Catch-all on purpose. subprocess.run raises for a whole family of
