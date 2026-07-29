@@ -648,6 +648,11 @@ def get_db():
         vo_cols = [r[1] for r in db.execute("PRAGMA table_info(vessel_overrides)").fetchall()]
         if 'berth_verified' not in vo_cols:
             db.execute("ALTER TABLE vessel_overrides ADD COLUMN berth_verified INTEGER DEFAULT 0")
+        # Persist runners-up so the cached path can replay "Elbe Highway or Seine
+        # Highway" — without this the JSON list computed by the scraper is
+        # thrown away and only ever seen on the very first detection.
+        if 'alternates_json' not in vo_cols:
+            db.execute("ALTER TABLE vessel_overrides ADD COLUMN alternates_json TEXT")
         # hub_legs table created by executescript above if not exists
         # Vessel tracking columns
         for col in ['vessel_mmsi','vessel_name','vessel_lat','vessel_lon',
@@ -4329,8 +4334,25 @@ def enrich_with_route(db, resp, order_hash, leg):
     """
     Attach depart_date to the vessel response so the frontend can compute
     voyage progress as a day-based ratio: elapsed / total days (departure → AIS ETA).
+
+    Also re-attach persisted `alternates` when the caller has not already set
+    them. The scraper computes runners-up on every fresh detection, but the
+    cached read paths above return only the winner — so the "or Seine Highway"
+    line vanished on every load after the first until this was added.
     """
     resp["depart_date"] = get_depart_date_for_order(db, order_hash, leg)
+    if "alternates" not in resp:
+        try:
+            row = db.execute(
+                "SELECT alternates_json FROM vessel_overrides "
+                "WHERE order_hash=? AND leg=?", (order_hash, leg)
+            ).fetchone()
+            if row and row["alternates_json"]:
+                resp["alternates"] = json.loads(row["alternates_json"]) or []
+            else:
+                resp["alternates"] = []
+        except Exception:
+            resp["alternates"] = []
     return resp
 
 
@@ -4397,7 +4419,7 @@ def api_vessel_detect(order_hash):
     if not depart_date_override and not mmsi_override:
         # Check vessel_overrides for this specific leg (leg-aware cache)
         leg_cached = db.execute("""
-            SELECT detected_mmsi, detected_name, detected_at, berth_verified
+            SELECT detected_mmsi, detected_name, detected_at, berth_verified, alternates_json
             FROM vessel_overrides
             WHERE order_hash=? AND leg=?
             AND detected_mmsi IS NOT NULL
@@ -4741,21 +4763,27 @@ def api_vessel_detect(order_hash):
         save_depart_date = left_factory_date
 
     bv = 1 if vessel.get('berth_verified') else 0
+    # Persist runners-up alongside the winner. Without this, alternates are
+    # computed by the scraper but discarded on write, so the cached read path
+    # returned "winner only" and the "or Seine Highway" line never appeared
+    # after the first load.
+    alt_json = json.dumps(vessel.get('alternates') or [])
     db.execute("""
-        INSERT INTO vessel_overrides (order_hash, leg, depart_date, detected_mmsi, detected_name, detected_at, source, berth_verified)
-        VALUES (?, ?, ?, ?, ?, datetime('now'), 'auto', ?)
+        INSERT INTO vessel_overrides (order_hash, leg, depart_date, detected_mmsi, detected_name, detected_at, source, berth_verified, alternates_json)
+        VALUES (?, ?, ?, ?, ?, datetime('now'), 'auto', ?, ?)
         ON CONFLICT(order_hash, leg) DO UPDATE SET
-            detected_mmsi  = excluded.detected_mmsi,
-            detected_name  = excluded.detected_name,
-            detected_at    = excluded.detected_at,
-            source         = CASE WHEN mmsi IS NOT NULL THEN 'user' ELSE 'auto' END,
-            berth_verified = CASE
+            detected_mmsi   = excluded.detected_mmsi,
+            detected_name   = excluded.detected_name,
+            detected_at     = excluded.detected_at,
+            alternates_json = excluded.alternates_json,
+            source          = CASE WHEN mmsi IS NOT NULL THEN 'user' ELSE 'auto' END,
+            berth_verified  = CASE
                 WHEN vessel_overrides.detected_mmsi = excluded.detected_mmsi
                     THEN MAX(vessel_overrides.berth_verified, excluded.berth_verified)
                 ELSE excluded.berth_verified
             END
     """, (order_hash, leg_override, save_depart_date,
-          vessel.get('mmsi'), vessel.get('name'), bv))
+          vessel.get('mmsi'), vessel.get('name'), bv, alt_json))
 
     _cache_vessel(db, order_hash, vessel, leg=leg_override)
     db.commit()
