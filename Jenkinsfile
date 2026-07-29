@@ -208,29 +208,31 @@ except Exception as e:
                     KEEP_BUILD="build-${env.BUILD_NUMBER}"
                     echo "Cleaning Docker Hub — keeping: latest, \$KEEP_BUILD"
 
-                    TOKEN=\$(python3 -c '
+                    # Use docker container since Jenkins agent has no python
+                    TOKEN=\$(docker run --rm -e DOCKER_USER -e DOCKER_PASS ${IMAGE}:${TAG} python -c '
 import urllib.request, json, os
 data = json.dumps({"username": os.environ["DOCKER_USER"], "password": os.environ["DOCKER_PASS"]}).encode()
 req = urllib.request.Request("https://hub.docker.com/v2/users/login/", data=data, headers={"Content-Type": "application/json"})
 print(json.load(urllib.request.urlopen(req))["token"])
-' 2>&1) || echo "Python exit code: \$?"
-                    echo "TOKEN length: \${#TOKEN}"
+')
 
                     if [ -z "\$TOKEN" ]; then echo "Hub login failed, skipping cleanup"; exit 0; fi
 
-                    curl -sf "https://hub.docker.com/v2/repositories/\$REPO/tags/?page_size=100" \
-                        -H "Authorization: Bearer \$TOKEN" \
-                        | python3 -c "import sys,json;[print(t['name']) for t in json.load(sys.stdin).get('results',[])]" \
-                        | while read tag; do
-                            if [ "\$tag" = "latest" ] || [ "\$tag" = "\$KEEP_BUILD" ]; then
-                                echo "  keeping: \$tag"
-                            else
-                                echo "  deleting: \$tag"
-                                curl -sf -X DELETE \
-                                    "https://hub.docker.com/v2/repositories/\$REPO/tags/\$tag/" \
-                                    -H "Authorization: Bearer \$TOKEN" || true
-                            fi
-                        done
+                    docker run --rm ${IMAGE}:${TAG} python -c "
+import urllib.request, json
+req = urllib.request.Request('https://hub.docker.com/v2/repositories/\$REPO/tags/?page_size=100',
+    headers={'Authorization': 'Bearer \$TOKEN'})
+[print(t['name']) for t in json.load(urllib.request.urlopen(req)).get('results',[])]
+" | while read tag; do
+                        if [ "\$tag" = "latest" ] || [ "\$tag" = "\$KEEP_BUILD" ]; then
+                            echo "  keeping: \$tag"
+                        else
+                            echo "  deleting: \$tag"
+                            curl -sf -X DELETE \
+                                "https://hub.docker.com/v2/repositories/\$REPO/tags/\$tag/" \
+                                -H "Authorization: Bearer \$TOKEN" || true
+                        fi
+                    done
                     echo "Hub cleanup done"
                 """
             }
