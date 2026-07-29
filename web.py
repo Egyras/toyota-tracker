@@ -1,11 +1,36 @@
 #!/usr/bin/env python3
 """Toyota Order Tracker — Flask web wrapper with anonymized stats collection."""
-import os, sys, json, sqlite3, subprocess, threading, time, hmac, secrets
+import os, sys, json, sqlite3, subprocess, threading, time, hmac, secrets, logging
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from flask import Flask, render_template_string, request, g, jsonify, send_from_directory
 
 app = Flask(__name__)
+
+# ── Access logging ────────────────────────────────────────────────────────────
+# Combined Log Format — compatible with CrowdSec's nginx/apache parsers.
+# Writes to /data/access.log (same volume as the DB).
+ACCESS_LOG = os.environ.get("ACCESS_LOG", "/data/access.log")
+
+@app.after_request
+def _log_access(response):
+    if request.path.startswith("/static") or request.path == "/favicon.ico":
+        return response
+    ip = request.headers.get("CF-Connecting-IP") or request.remote_addr
+    now = datetime.utcnow().strftime("%d/%b/%Y:%H:%M:%S +0000")
+    line = (
+        f'{ip} - - [{now}] '
+        f'"{request.method} {request.full_path.rstrip("?")} {request.environ.get("SERVER_PROTOCOL","HTTP/1.1")}" '
+        f'{response.status_code} {response.content_length or 0} '
+        f'"{request.referrer or "-"}" '
+        f'"{request.user_agent.string or "-"}"\n'
+    )
+    try:
+        with open(ACCESS_LOG, "a") as f:
+            f.write(line)
+    except Exception:
+        pass
+    return response
 
 USERNAME     = os.environ.get("TOYOTA_USERNAME", "")
 PASSWORD     = os.environ.get("TOYOTA_PASSWORD", "")
