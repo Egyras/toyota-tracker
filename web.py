@@ -2589,22 +2589,28 @@ TRACKER_PAGE = BASE + """
        overrides['zeebrugge']. Anything typed there went into a leg nothing reads.
        Keying the controls off `active.key` guarantees the manual override and the
        auto-detection address the same leg. #}
-    {% set active = namespace(key='nagoya', row='', departed=true) %}
+    {% set active = namespace(key='nagoya', row='', leg_completed=false) %}
     {% for d in delivs %}
     {% set aloc = d.locationName | lower %}
-    {% if d.isVisited in ('visited', 'current') and d.destinationType in ['HUB','TRANSIT'] %}
-      {% if 'zeebrugge' in aloc %}{% set active.key = 'zeebrugge' %}{% set active.departed = (d.isVisited == 'visited') %}
-      {% elif 'malmo' in aloc or 'malmö' in aloc %}{% set active.key = 'malmo' %}{% set active.departed = (d.isVisited == 'visited') %}
-      {% elif 'sagunto' in aloc %}{% set active.key = 'sagunto' %}{% set active.departed = (d.isVisited == 'visited') %}
-      {% elif 'livorno' in aloc %}{% set active.key = 'livorno' %}{% set active.departed = (d.isVisited == 'visited') %}
-      {% elif 'bristol' in aloc or 'portbury' in aloc %}{% set active.key = 'portbury' %}{% set active.departed = (d.isVisited == 'visited') %}
-      {% elif 'southampton' in aloc %}{% set active.key = 'southampton' %}{% set active.departed = (d.isVisited == 'visited') %}
-      {% elif 'drammen' in aloc %}{% set active.key = 'drammen' %}{% set active.departed = (d.isVisited == 'visited') %}
-      {% elif 'piraeus' in aloc %}{% set active.key = 'piraeus' %}{% set active.departed = (d.isVisited == 'visited') %}
-      {% elif 'gothenburg' in aloc or 'göteborg' in aloc %}{% set active.key = 'gothenburg' %}{% set active.departed = (d.isVisited == 'visited') %}
+    {% if d.isVisited == 'visited' and d.destinationType in ['HUB','TRANSIT'] %}
+      {% if 'zeebrugge' in aloc %}{% set active.key = 'zeebrugge' %}
+      {% elif 'malmo' in aloc or 'malmö' in aloc %}{% set active.key = 'malmo' %}
+      {% elif 'sagunto' in aloc %}{% set active.key = 'sagunto' %}
+      {% elif 'livorno' in aloc %}{% set active.key = 'livorno' %}
+      {% elif 'bristol' in aloc or 'portbury' in aloc %}{% set active.key = 'portbury' %}
+      {% elif 'southampton' in aloc %}{% set active.key = 'southampton' %}
+      {% elif 'drammen' in aloc %}{% set active.key = 'drammen' %}
+      {% elif 'piraeus' in aloc %}{% set active.key = 'piraeus' %}
+      {% elif 'gothenburg' in aloc or 'göteborg' in aloc %}{% set active.key = 'gothenburg' %}
       {% endif %}
     {% endif %}
     {% endfor %}
+    {# Check if the active leg's DESTINATION has already been reached (current/visited).
+       If so AND we already have vessel data, the leg is fully completed — show static
+       note instead of live tracking. If no vessel data yet, let detection run once. #}
+    {% if active.key in order._completed_legs %}
+      {% set active.leg_completed = true %}
+    {% endif %}
     {# Current position: the stop the car is AT, else the one it is en route to,
        else the next one it has not reached. First match wins. #}
     {% for d in delivs %}
@@ -3480,13 +3486,12 @@ TRACKER_PAGE = BASE + """
         var dateReliable = lfBounded || hasUserDate || hasUserMmsi;
 
         if(hash){
-          // active.departed is false when the car is still AT the departure hub
-          // (status=current, not visited). Detection makes no sense: the ship
-          // hasn't loaded the car yet. Completed legs show a static "Carried by"
-          // note instead. Detection activates once Toyota changes the hub to
-          // 'visited' and the next stop to 'current'.
-          var legDeparted = {{ 'true' if active.departed else 'false' }};
-          if(!legDeparted){
+          // If the active leg already has a known vessel AND its destination
+          // was reached (current/visited), skip live detection — the static
+          // "Carried by" note handles it. Without vessel data, let detection
+          // run once so it can find and persist the result.
+          var legCompleted = {{ 'true' if active.leg_completed else 'false' }};
+          if(legCompleted){
             var skel0b = document.getElementById('vessel-skeleton');
             if(skel0b) skel0b.style.display = 'none';
             return;
