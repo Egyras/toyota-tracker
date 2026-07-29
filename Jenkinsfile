@@ -218,21 +218,47 @@ print(json.load(urllib.request.urlopen(req))["token"])
 
                     if [ -z "\$TOKEN" ]; then echo "Hub login failed, skipping cleanup"; exit 0; fi
 
+                    # Get tags with their digests, delete images by digest
                     docker run --rm ${IMAGE}:${TAG} python -c "
-import urllib.request, json
-req = urllib.request.Request('https://hub.docker.com/v2/repositories/\$REPO/tags/?page_size=100',
-    headers={'Authorization': 'Bearer \$TOKEN'})
-[print(t['name']) for t in json.load(urllib.request.urlopen(req)).get('results',[])]
-" | while read tag; do
-                        if [ "\$tag" = "latest" ] || [ "\$tag" = "\$KEEP_BUILD" ]; then
-                            echo "  keeping: \$tag"
-                        else
-                            echo "  deleting: \$tag"
-                            curl -sf -X DELETE \
-                                "https://hub.docker.com/v2/repositories/\$REPO/tags/\$tag/" \
-                                -H "Authorization: Bearer \$TOKEN" || true
-                        fi
-                    done
+import urllib.request, json, sys
+keep = {'latest', '\$KEEP_BUILD'}
+repo = '\$REPO'
+token = '\$TOKEN'
+hdr = {'Authorization': 'Bearer ' + token}
+
+# List all tags with digests
+req = urllib.request.Request(
+    'https://hub.docker.com/v2/repositories/' + repo + '/tags/?page_size=100',
+    headers=hdr)
+tags = json.load(urllib.request.urlopen(req)).get('results', [])
+
+for t in tags:
+    name = t['name']
+    digest = t.get('digest', '')
+    if name in keep:
+        print('  keeping: ' + name)
+        continue
+    if not digest:
+        print('  skip (no digest): ' + name)
+        continue
+    # Delete image by digest — this removes the manifest + layers
+    print('  deleting image: ' + name + ' (' + digest[:20] + '...)')
+    try:
+        dreq = urllib.request.Request(
+            'https://hub.docker.com/v2/repositories/' + repo + '/images/' + digest,
+            method='DELETE', headers=hdr)
+        urllib.request.urlopen(dreq)
+    except Exception as e:
+        # Fall back to tag delete
+        print('    digest delete failed (' + str(e) + '), removing tag...')
+        try:
+            treq = urllib.request.Request(
+                'https://hub.docker.com/v2/repositories/' + repo + '/tags/' + name + '/',
+                method='DELETE', headers=hdr)
+            urllib.request.urlopen(treq)
+        except Exception as e2:
+            print('    tag delete also failed: ' + str(e2))
+"
                     echo "Hub cleanup done"
                 """
             }
