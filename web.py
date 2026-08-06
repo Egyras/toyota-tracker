@@ -203,6 +203,7 @@ TOYOTA_CARRIERS = {
     "432988000": "Libra Leader",
     "431946000": "Leo Leader",
     "477816600": "Danube Highway",
+    "308803000": "Danube Highway",   # K-Line EUR feeder, IMO 9316309
     # Note: Vela Leader (MMSI 636024024) is a real NYK PCC but serves Asia/Americas/Europe
     # routes. We deliberately keep her unverified so the destination filter is the gate —
     # she's only "correct" for European orders when AIS dest indicates a European port.
@@ -2636,6 +2637,20 @@ TRACKER_PAGE = BASE + """
     {% if active.key in order._completed_legs %}
       {% set active.leg_completed = true %}
     {% endif %}
+    {# Also mark the leg completed when the car has physically arrived at the
+       NEXT stop (status='current' at a HUB or TRANSIT). The vessel already
+       delivered the car — continuing to show live tracking would display the
+       vessel heading to its next rotation port (e.g. Hanko), which is
+       misleading. Previously this waited for the stop to become 'visited',
+       but that only happens when the truck picks the car up, which can take
+       days. #}
+    {% if not active.leg_completed %}
+      {% for d in delivs %}
+        {% if d.isVisited == 'current' and d.destinationType in ('HUB', 'TRANSIT') %}
+          {% set active.leg_completed = true %}
+        {% endif %}
+      {% endfor %}
+    {% endif %}
     {# Current position: the stop the car is AT, else the one it is en route to,
        else the next one it has not reached. First match wins. #}
     {% for d in delivs %}
@@ -3516,9 +3531,35 @@ TRACKER_PAGE = BASE + """
           // "Carried by" note handles it. Without vessel data, let detection
           // run once so it can find and persist the result.
           var legCompleted = {{ 'true' if active.leg_completed else 'false' }};
-          if(legCompleted){
+          var hasDetectionResult = {{ 'true' if active.key in (order._completed_legs or {}) else 'false' }};
+          if(legCompleted && hasDetectionResult){
+            // Vessel already known and leg done — static "Carried by" note
+            // handles display, no need for live detection.
             var skel0b = document.getElementById('vessel-skeleton');
             if(skel0b) skel0b.style.display = 'none';
+            return;
+          }
+          if(legCompleted && !hasDetectionResult){
+            // Car arrived at destination (leg done) but we haven't detected
+            // the vessel yet. Run detection ONCE to populate "Carried by",
+            // but don't show live tracking — the vessel has already moved on.
+            if(dateReliable || lfBounded){
+              fetch('/api/vessel-detect/'+hash+'?leg='+leg)
+                .then(function(r){return r.json();})
+                .then(function(d){
+                  // Detection saved to vessel_overrides; on next reload
+                  // "Carried by" note will appear. No live vessel card.
+                  var skel0c = document.getElementById('vessel-skeleton');
+                  if(skel0c) skel0c.style.display = 'none';
+                })
+                .catch(function(){
+                  var skel0c = document.getElementById('vessel-skeleton');
+                  if(skel0c) skel0c.style.display = 'none';
+                });
+            } else {
+              var skel0b = document.getElementById('vessel-skeleton');
+              if(skel0b) skel0b.style.display = 'none';
+            }
             return;
           }
           if(!dateReliable){
