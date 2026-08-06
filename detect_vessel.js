@@ -209,11 +209,20 @@ async function verifyBerth(mmsi, imo, departDate, leg) {
     var points = Array.isArray(data) ? data : (data.data || data.points || []);
     var lf = new Date(departDate+'T00:00:00Z');
     var window_start = new Date(lf.getTime() - 6*86400000);
-    // Only stationary points within the time window (D-6 to D, before email arrival)
+    // Berth window end: for Nagoya the departDate is the factory-email date which
+    // arrives AFTER sailing, so midnight-of-that-day is a correct upper bound.
+    // For feeder legs the departDate is the MST departure DATE — the ship may
+    // arrive and depart on the SAME calendar day (e.g. Danube Highway at Malmö:
+    // arrived 06:18, departed 20:07). Using midnight truncates ALL berth points
+    // for same-day turnarounds, the check returns false, and the vessel is
+    // rejected with europeScore = -1. Extend by 1 day on feeder legs so the
+    // full departure day is included.
+    var isFeeder = !(leg === 'nagoya' || leg === 'yokkaichi' || leg === 'hiroshima');
+    var window_end_berth = isFeeder ? new Date(lf.getTime() + 86400000) : lf;
     var window_pts = points.filter(function(p){
       if(!p.lat || !p.lng) return false;
       var t = new Date(p.updated);
-      return t >= window_start && t <= lf && (p.speed_kn||0) <= 1;
+      return t >= window_start && t <= window_end_berth && (p.speed_kn||0) <= 1;
     });
 
     if(leg === 'nagoya'){
