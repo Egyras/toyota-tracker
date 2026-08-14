@@ -1154,6 +1154,15 @@ def get_current_stop_info(db, order_hash, deliveries):
         return None
     loc_key = loc_name.upper()
 
+    # For stops that progressed past 'current' to 'inTransit' or 'visited',
+    # also accept earlier states so we capture the real arrival date even if
+    # the poller missed the exact transition (e.g. container reboot gap).
+    target_states = {state}
+    if state == 'inTransit':
+        target_states.add('current')
+    elif state == 'visited':
+        target_states.update(('current', 'inTransit'))
+
     first_seen = None
     try:
         rows = db.execute("""
@@ -1176,7 +1185,7 @@ def get_current_stop_info(db, order_hash, deliveries):
             # raw API spelling too in case of older rows.
             sloc = (d.get("loc") or d.get("locationName") or "").upper()
             sstate = (d.get("visited") or d.get("isVisited") or "")
-            if sloc == loc_key and sstate == state:
+            if sloc == loc_key and sstate in target_states:
                 first_seen = row["ts"][:10]
                 break
         if first_seen:
@@ -2282,7 +2291,19 @@ TRACKER_PAGE = BASE + """
       {% else %}
         <span class="badge badge-ontrack">✓ No damage</span>
       {% endif %}
-      <span class="badge badge-current">{{ st.currentStatus }}</span>
+      {% set _status_labels = {
+        'orderPlaced':          'Order Placed',
+        'orderApproved':        'Order Approved',
+        'buildInProgress':      'Build In Progress',
+        'leftTheFactory':       'Left The Factory',
+        'inTransit':            'In Transit',
+        'leftTheDepot':         'Left The Depot',
+        'arrivedInCountry':     'Arrived In Country',
+        'ArrivedInCountry':     'Arrived In Country',
+        'arrivedAtRetailer':    'Arrived At Retailer',
+        'arrivedInDestination': 'Arrived In Destination',
+      } %}
+      <span class="badge badge-current">{{ _status_labels.get(st.currentStatus, st.currentStatus) }}</span>
     </div>
   </div>
 
@@ -2409,7 +2430,7 @@ TRACKER_PAGE = BASE + """
             <div style="display:flex;align-items:center;gap:8px;margin-top:6px;flex-wrap:wrap;">
               <div style="font-size:12px;color:var(--red);font-weight:500;"
                    title="First check in which {{ order._current_stop.location }} reported this state">
-                {{ 'at' if order._current_stop.state == 'current' else 'en route to' }}
+                {{ 'at' if order._current_stop.state in ('current', 'inTransit') else 'en route to' }}
                 {{ order._current_stop.location }} since: {{ order._current_stop.date }}</div>
             </div>
             {% endif %}
@@ -2705,7 +2726,7 @@ TRACKER_PAGE = BASE + """
          on the ARRIVAL stop, which is the one AFTER the departure hub.
          `arriving_leg` is the leg that delivered the car HERE. #}
       {% set arriving_leg = '' %}
-      {% if v in ('visited', 'current') %}
+      {% if v in ('visited', 'current', 'inTransit') %}
         {# Walk backwards: which hub BEFORE this stop is a completed leg? #}
         {% if 'Malmo' in d.locationName or 'Malmö' in d.locationName %}{% set arriving_leg = 'zeebrugge' %}
         {% elif 'Paldiski' in d.locationName %}{% set arriving_leg = 'malmo' %}
@@ -4949,6 +4970,70 @@ def api_vessel_overrides(order_hash):
             "source":        r["source"],
         }
     return jsonify(result)
+
+@app.route("/api/status-history/<order_hash>")
+def api_status_history(order_hash):
+    """Return chronological status changes and delivery state transitions."""
+    db = get_db()
+    # Status changes from checks table — each row is a login snapshot
+    rows = db.execute("""
+        SELECT ts, status, deliveries_json
+        FROM checks
+        WHERE order_hash=? AND status IS NOT NULL
+        ORDER BY ts ASC
+    """, (order_hash,)).fetchall()
+
+    # Build timeline: emit an entry whenever status or a delivery state changes
+    timeline = []
+    prev_status = None
+    prev_stops = {}
+    for r in rows:
+        ts = r["ts"]
+        status = r["status"]
+        # Track overall status changes
+        if status != prev_status:
+            timeline.append({
+                "ts": ts,
+                "type": "status",
+                "from": prev_status,
+                "to": status,
+            })
+            prev_status = status
+        # Track per-stop state changes (visited/current/inTransit)
+        try:
+            delivs = json.loads(r["deliveries_json"] or "[]")
+            for d in (delivs if isinstance(delivs, list) else []):
+                loc = d.get("loc") or d.get("locationName") or ""
+                state = d.get("visited") or d.get("isVisited") or ""
+                if loc and state and prev_stops.get(loc) != state:
+                    timeline.append({
+                        "ts": ts,
+                        "type": "stop",
+                        "location": loc,
+                        "from": prev_stops.get(loc),
+                        "to": state,
+                    })
+                    prev_stops[loc] = state
+        except Exception:
+            pass
+
+    # Step durations
+    steps = []
+    for sd in db.execute("""
+        SELECT step, date_entered, date_left, duration_days, observed
+        FROM step_durations WHERE order_hash=?
+        ORDER BY date_entered ASC
+    """, (order_hash,)).fetchall():
+        steps.append({
+            "step": sd["step"],
+            "entered": sd["date_entered"],
+            "left": sd["date_left"],
+            "duration_days": sd["duration_days"],
+            "observed": sd["observed"],
+        })
+
+    return jsonify(timeline=timeline, steps=steps)
+
 
 @app.route("/stats/count")
 def stats_count():
