@@ -234,7 +234,11 @@ def is_wrong_continent_for_order(vessel_dest: str, order_dest_country: str) -> b
                        'LOS ANGELES','SAN ANTONIO','IQUIQUE','BRUNSWICK',
                        'DAVISVILLE','BALTIMORE','VERACRUZ','SYDNEY',
                        'MELBOURNE','AUCKLAND','HONG KONG',
-                       'BANGKOK','MANILA')
+                       'BANGKOK','MANILA',
+                       'BALBOA','CRISTOBAL','MANZANILLO','PANAMA',
+                       'SAN DIEGO','HUENEME','BENICIA','TACOMA',
+                       'JACKSONVILLE','SAVANNAH','CHARLESTON',
+                       'SANTOS','PARANAGUA','CALLAO','HOUSTON')
     if not order_eu:
         return False  # only flag for EU-bound orders (most of our use case)
     if any(vdest.startswith(p) for p in non_eu_prefixes):
@@ -2870,7 +2874,10 @@ TRACKER_PAGE = BASE + """
     }
     // Use date-based detection
     var url = '/api/vessel-detect/'+orderHash+'?depart_date='+date+'&leg='+leg;
-    fetch(url).then(r=>r.json()).then(d=>{
+    fetch(url).then(function(r){
+      if(r.status===409) return r.json().then(function(e){ throw e; });
+      return r.json();
+    }).then(d=>{
       if(d.mmsi||d.lat) {
         /* NB: \\n not \n — TRACKER_PAGE is a plain Python string, so a single
            backslash-n is turned into a REAL newline before the browser sees it,
@@ -2882,7 +2889,11 @@ TRACKER_PAGE = BASE + """
       } else {
         alert('❌ No Toyota carrier found for '+leg+' around '+date+'.\\nTry adjusting the date by ±1-2 days.');
       }
-    }).catch(function(){ alert('Detection failed. Try again.'); });
+    }).catch(function(e){
+      if(e && e.error==='wrong_destination'){
+        alert('⚠️ '+e.name+' is heading to '+e.destination+', not toward '+e.order_country+'.\\nThis vessel is on a different route.');
+      } else { alert('Detection failed. Try again.'); }
+    });
   }
   </script>
 
@@ -4579,6 +4590,19 @@ def api_vessel_detect(order_hash):
         pos = get_vessel_position(override['mmsi'], order_dest_country)
         if pos:
             return jsonify(enrich_with_route(db, {**pos, "source": "user_override", "leg": leg_override}, order_hash, leg_override))
+        # Position lookup returned None — likely wrong-continent reject.
+        # Try again WITHOUT continent filter to get the vessel's actual destination
+        # so we can tell the user WHY it was rejected.
+        pos_raw = get_vessel_position(override['mmsi'], None)
+        if pos_raw:
+            raw_dest = (pos_raw.get('destination') or '').upper()
+            return jsonify({"error": "wrong_destination",
+                            "mmsi": override['mmsi'],
+                            "name": pos_raw.get('name', ''),
+                            "destination": raw_dest,
+                            "order_country": order_dest_country or '',
+                            "message": f"Vessel {pos_raw.get('name','')} is heading to {raw_dest}, "
+                                       f"not toward {order_dest_country}"}), 409
 
     # Check leg-aware cache in vessel_overrides first
     if not depart_date_override and not mmsi_override:

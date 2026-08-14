@@ -1002,6 +1002,10 @@ if(MMSI){
         // Americas, Pacific, Australia, or returning to Japan from Europe.
         var OFF_ROUTE_DEST=[
           'LOS ANGELES','LONG BEACH','BALTIMORE','BRUNSWICK','JACKSONVILLE',
+          'BALBOA','CRISTOBAL','MANZANILLO','LAZARO CARDENAS','VERACRUZ',  // Panama/Central America/Mexico
+          'SAN DIEGO','HUENEME','BENICIA','TACOMA','PORTLAND',             // US West Coast
+          'NEW YORK','NEWARK','SAVANNAH','CHARLESTON','HOUSTON','GALVESTON',// US East/Gulf
+          'SANTOS','PARANAGUA','IQUIQUE','CALLAO','SAN ANTONIO',           // South America
           'SYDNEY','MELBOURNE','AUCKLAND','FREMANTLE',
           'DURBAN','MOMBASA','DAR ES SALAAM',
           'YOKOHAMA','TOKYO','OSAKA','KOBE','HITACHI','KASHIMA',  // Japan ports (not on Europe route)
