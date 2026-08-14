@@ -2351,7 +2351,10 @@ TRACKER_PAGE = BASE + """
         </div>
         <div style="flex:1;padding-top:2px;">
           <div class="step-name">{{ step_name }}</div>
-          {% if step_data.location %}
+          {% if s == 'current' and order._current_stop and order._current_stop.location
+                and step_data.location and order._current_stop.location not in step_data.location %}
+          <div class="step-meta">{{ order._current_stop.location }}, {{ order._current_stop.country }}</div>
+          {% elif step_data.location %}
           <div class="step-meta">{{ step_data.location }}</div>
           {% endif %}
           <span class="badge badge-{{ s }}" style="margin-top:5px;">{{ s }}</span>
