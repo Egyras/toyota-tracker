@@ -1468,16 +1468,25 @@ if(MMSI){
               (curPos.dest?', dest='+curPos.dest:'')+')\n');
             continue;
           }
-            // ROUTE REGION CHECK — only if we know the order's destination region
+            // EUROPE HISTORY CHECK — vessel must have visited at least one
+            // European port in recent track data. Without this, vessels on
+            // non-Europe rotations (e.g. Japan→South America) pass all other
+            // checks simply by loading at the same Nagoya terminal.
+            var vRegion = await vesselRegion(cnd.mmsi);
+            if(vRegion === null){
+              process.stderr.write('  '+cnd.vessel+': REJECTED (no European port visits in 120-day track — not on Europe rotation)\n');
+              continue;
+            }
+            // ROUTE REGION CHECK — if we know the order's destination region,
+            // also verify the vessel serves that specific region
             if(ORDER_REGION){
-              var vRegion = await vesselRegion(cnd.mmsi);
               if(vRegion && vRegion !== "MIXED" && vRegion !== ORDER_REGION){
                 process.stderr.write('  '+cnd.vessel+': REJECTED (serves '+vRegion+
                   ' route, order is '+ORDER_REGION+')\n');
                 continue;
               }
-              cnd.vRegion = vRegion;
             }
+            cnd.vRegion = vRegion;
           cnd.curLat = plat; cnd.curLon = plon; cnd.curDest = curPos.dest;
           goodCandidates.push(cnd);
         } catch(e){
